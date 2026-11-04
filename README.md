@@ -172,3 +172,11 @@ ees@ees-zhi: sudo tcpdump -i enp7s0 -nn -s 0 -w test.pcap
  构建一个echo的回环，从client发送数据到server接收数据并且将数据转发给client，查看tcp的发送计数以及接收计数是否一致。
 
 ![image-20261104143255410](img/image-20261104143255410.png)
+
+
+
+代码参考：
+
+```http
+https://github.com/alexforencich/verilog-ethernet
+```
