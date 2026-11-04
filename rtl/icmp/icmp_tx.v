@@ -1,7 +1,7 @@
 /****************************************************************************
- * @file    icmp_tx_ack_10g.v
+ * @file    icmp_tx.v
  * @brief  
- * @author  weslie (zzhi4832@gmail.com)
+ * @author  zzhi (zzhi4832@gmail.com)
  * @version 1.0
  * @date    2025-01-22
  * 
@@ -9,10 +9,10 @@
  * ___________________________________________________________________________
  * |    Date       |  Version    |       Author     |       Description      |
  * |---------------|-------------|------------------|------------------------|
- * |               |   v1.0      |    weslie        | Support 100Gbps        |
+ * |               |   v1.0      |    zzhi          | icmp tx                |
  * |---------------|-------------|------------------|------------------------|
  * 
- * @copyright Copyright (c) 2025 welie
+ * @copyright Copyright (c) 2025 zzhi
  * ***************************************************************************/
 
 `timescale 1ns/1ps
@@ -233,20 +233,67 @@ always @(posedge tx_axis_aclk) begin
     end
 end
 
-xpm_sync_fifo #(
-    .WIDTH     	(ICMP_TX_TOTAL_WIDTH - 1),
-    .DEPTH     	(11     ),
-    .FIFO_TYPE 	("fwft" )
-)icmp_tx_fifo(
-    .clk         	(tx_axis_aclk       ),
-    .rst         	(~tx_axis_aresetn   ),
-    .wr_en        (icmp_tx_fifo_wren  ),
-    .rd_en        (icmp_tx_fifo_rden  ),
-    .data         (icmp_tx_fifo_din   ),
-    .dout         (icmp_tx_fifo_dout  ),
-    .full        	(),
-    .empty       	(icmp_tx_fifo_empty),
-    .almost_full 	(icmp_tx_fifo_alful)
+// xpm_sync_fifo #(
+//     .WIDTH     	(ICMP_TX_TOTAL_WIDTH - 1),
+//     .DEPTH     	(11     ),
+//     .FIFO_TYPE 	("fwft" )
+// )icmp_tx_fifo(
+//     .clk         	(tx_axis_aclk       ),
+//     .rst         	(~tx_axis_aresetn   ),
+//     .wr_en        (icmp_tx_fifo_wren  ),
+//     .rd_en        (icmp_tx_fifo_rden  ),
+//     .data         (icmp_tx_fifo_din   ),
+//     .dout         (icmp_tx_fifo_dout  ),
+//     .full        	(),
+//     .empty       	(icmp_tx_fifo_empty),
+//     .almost_full 	(icmp_tx_fifo_alful)
+// );
+
+localparam      FIFO_MEMORY         = "auto";
+localparam      USER_ADV_FEATURES   = "1f1f";
+localparam      CASCADE_HEIGHT      = 0;
+localparam      DOUT_RESET_VALUE    = "0";
+localparam      ECC_MODE            = (FIFO_MEMORY == "auto") ? "no_ecc" : "en_ecc";
+localparam      FIFO_MEMORY_TYPE    = FIFO_MEMORY;
+localparam      FULL_RESET_VALUE    = 0;
+localparam      PROG_EMPTY_THRESH   = 10;
+localparam      PROG_FULL_THRESH    = 10;
+localparam      SIM_ASSERT_CHK      = 1;
+localparam      USE_ADV_FEATURES    = USER_ADV_FEATURES;
+localparam      WAKEUP_TIME         = (FIFO_MEMORY_TYPE == "auto") ? 0 : 2;
+
+
+xpm_fifo_sync #(
+      .CASCADE_HEIGHT       (CASCADE_HEIGHT      ),       
+      .DOUT_RESET_VALUE     (DOUT_RESET_VALUE    ),    
+      .ECC_MODE             (ECC_MODE            ),     
+      .FIFO_MEMORY_TYPE     (FIFO_MEMORY_TYPE    ),
+      .FIFO_READ_LATENCY    (1),   
+      .FIFO_WRITE_DEPTH     (8), 
+      .FULL_RESET_VALUE     (FULL_RESET_VALUE    ),     
+      .PROG_EMPTY_THRESH    (PROG_EMPTY_THRESH   ),   
+      .PROG_FULL_THRESH     (PROG_FULL_THRESH    ),   
+      .RD_DATA_COUNT_WIDTH  (5 ),  
+      .READ_DATA_WIDTH      (ICMP_TX_TOTAL_WIDTH-1),   
+      .READ_MODE            ("fwft"              ),        
+      .SIM_ASSERT_CHK       (SIM_ASSERT_CHK      ),        
+      .USE_ADV_FEATURES     (USE_ADV_FEATURES    ), 
+      .WAKEUP_TIME          (WAKEUP_TIME         ),          
+      .WRITE_DATA_WIDTH     (ICMP_TX_TOTAL_WIDTH-1),     
+      .WR_DATA_COUNT_WIDTH  (5 )    
+)icmp_fifo (
+      .sleep                (0            ), 
+      .injectdbiterr        (1'b0         ),
+      .injectsbiterr        (1'b0         ), 
+      .almost_full          (icmp_tx_fifo_alful),   
+      .dout                 (icmp_tx_fifo_dout),      
+      .empty                (icmp_tx_fifo_empty),     
+      .wr_data_count        (icmp_tx_fifo_count),
+      .din                  (icmp_tx_fifo_din),
+      .rd_en                (icmp_tx_fifo_rden),               
+      .rst                  (~tx_axis_aresetn),
+      .wr_clk               (tx_axis_aclk),              
+      .wr_en                (icmp_tx_fifo_wren)
 );
 
 reg     icmp_tx_fifo_wren_reg   =   0;

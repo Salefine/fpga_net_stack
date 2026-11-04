@@ -25,11 +25,34 @@
    cd fpga_net_stack
    ```
 
-2. 操作环境为windows,这里需要修改build.bat中的VIVADO安装路径。
+2. Windows 环境使用 `scripts\build.bat` 集成入口：运行后列出所有开发板（如 `Alveo_U200`、`xcvu5p`），选择后直接在对应的 `example\<开发板>\fpga` 目录下创建/打开 Vivado 工程。工程创建脚本已集成在 `scripts\build.bat` 内（网络协议栈 RTL 列表共享，开发板器件型号在脚本内 `:board_cfg` 板卡表中配置；尚未实现的开发板会在菜单中标注 `[not implemented yet]`）。Vivado 安装路径通过环境变量 `VIVADO_2024_2` 指定，或修改脚本内的默认路径。
 
    ```cmd
    cd scripts
    ./build.bat
+   ```
+
+   也可以跳过菜单，直接指定开发板与目标：
+
+   ```cmd
+   ./build.bat xcvu5p
+   ./build.bat xcvu5p fpga
+   ./build.bat xcvu5p clean
+   ./build.bat list
+   ```
+
+   - `./build.bat xcvu5p` — 打开 xcvu5p 工程（默认目标 `open`，启动 Vivado GUI，工程不存在时先创建）
+   - `./build.bat xcvu5p fpga` — 创建/恢复 xcvu5p 的 Vivado 工程
+   - `./build.bat xcvu5p clean` — 清除 xcvu5p 生成的工程文件
+   - `./build.bat list` — 列出所有开发板
+
+3. Linux 环境使用开发板目录下的 Makefile（Vivado 路径在 Makefile 顶部的 `VIVADO_SETTINGS` 中修改）：
+
+   ```bash
+   cd example/xcvu5p/fpga
+   make fpga    # 创建/恢复工程
+   make         # 打开 Vivado GUI
+   make clean   # 清除生成的文件
    ```
 
    代码中关于协议栈的选择，选择UDP/TCP就将其置1。

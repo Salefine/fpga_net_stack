@@ -1,7 +1,7 @@
 /****************************************************************************
- * @file    icmp_rx_req_10g.v
+ * @file    icmp_rx.v
  * @brief  
- * @author  weslie (zzhi4832@gmail.com)
+ * @author  zzhi (zzhi4832@gmail.com)
  * @version 1.0
  * @date    2025-01-22
  * 
@@ -9,10 +9,10 @@
  * ___________________________________________________________________________
  * |    Date       |  Version    |       Author     |       Description      |
  * |---------------|-------------|------------------|------------------------|
- * |               |   v1.0      |    weslie        | Support 100Gbps        |
+ * |               |   v1.0      |    zzhi          | icmp receive           |
  * |---------------|-------------|------------------|------------------------|
  * 
- * @copyright Copyright (c) 2025 welie
+ * @copyright Copyright (c) 2025 zzhi
  * ***************************************************************************/
 
 `timescale 1ns/1ps
@@ -152,47 +152,94 @@ always @(*) begin
     endcase
 end
 
-    wire    icmp_payload_alful;
+wire    icmp_payload_alful;
+// input backpressure: accept beats only while a frame is being parsed and
+// the payload FIFO has room.  Beats of a following frame are held off until
+// the current reply has been fully handed to icmp_tx, which keeps the FSM
+// and the FIFO strictly frame-aligned.
+assign ip_rx_axis_tready = ((icmp_recv_state == RECV_HEADER) || (icmp_recv_state == RECV_DATA))
+                           && ~icmp_payload_alful;
 
-    // input backpressure: accept beats only while a frame is being parsed and
-    // the payload FIFO has room.  Beats of a following frame are held off until
-    // the current reply has been fully handed to icmp_tx, which keeps the FSM
-    // and the FIFO strictly frame-aligned.
-    assign ip_rx_axis_tready = ((icmp_recv_state == RECV_HEADER) || (icmp_recv_state == RECV_DATA))
-                               && ~icmp_payload_alful;
-
-    always @(posedge rx_axis_aclk) begin
-        if (~rx_axis_aresetn) begin
-            icmp_payload_wren <= 0;
-            icmp_payload_din  <= 0;
-        end
-        else if (ip_rx_axis_tvalid & ip_rx_axis_tready) begin
-            icmp_payload_wren <= 1;
-            icmp_payload_din  <= {ip_rx_axis_tlast,ip_rx_axis_tuser,ip_rx_axis_tvalid,ip_rx_axis_tdata,ip_rx_axis_tkeep};
-        end
-        else begin
-            icmp_payload_wren <= 0;
-            icmp_payload_din  <= 0;
-        end
+always @(posedge rx_axis_aclk) begin
+    if (~rx_axis_aresetn) begin
+        icmp_payload_wren <= 0;
+        icmp_payload_din  <= 0;
     end
+    else if (ip_rx_axis_tvalid & ip_rx_axis_tready) begin
+        icmp_payload_wren <= 1;
+        icmp_payload_din  <= {ip_rx_axis_tlast,ip_rx_axis_tuser,ip_rx_axis_tvalid,ip_rx_axis_tdata,ip_rx_axis_tkeep};
+    end
+    else begin
+        icmp_payload_wren <= 0;
+        icmp_payload_din  <= 0;
+    end
+end
+
+// xpm_sync_fifo #(
+//     .WIDTH     	(ICMP_RX_TOTAL_WIDTH),
+//     .DEPTH     	(11                 ),
+//     .FIFO_TYPE 	("fwft"             )
+// )
+// icmp_payload(
+//     .clk         	(rx_axis_aclk           ),
+//     .rst         	(~rx_axis_aresetn       ),
+//     .wr_en        (icmp_payload_wren      ),
+//     .rd_en        (icmp_payload_rden      ),
+//     .data         (icmp_payload_din       ),
+//     .dout         (icmp_payload_dout      ),
+//     .full        	(                       ),
+//     .empty       	(icmp_payload_empty     ),
+//     .almost_full 	(icmp_payload_alful     )
+// );
 
 
-    xpm_sync_fifo #(
-        .WIDTH     	(ICMP_RX_TOTAL_WIDTH),
-        .DEPTH     	(11                 ),
-        .FIFO_TYPE 	("fwft"             )
-    )
-    icmp_payload(
-        .clk         	(rx_axis_aclk           ),
-        .rst         	(~rx_axis_aresetn       ),
-        .wr_en        (icmp_payload_wren      ),
-        .rd_en        (icmp_payload_rden      ),
-        .data         (icmp_payload_din       ),
-        .dout         (icmp_payload_dout      ),
-        .full        	(                       ),
-        .empty       	(icmp_payload_empty     ),
-        .almost_full 	(icmp_payload_alful     )
-    );
+localparam      FIFO_MEMORY         = "auto";
+localparam      USER_ADV_FEATURES   = "1f1f";
+localparam      CASCADE_HEIGHT      = 0;
+localparam      DOUT_RESET_VALUE    = "0";
+localparam      ECC_MODE            = (FIFO_MEMORY == "auto") ? "no_ecc" : "en_ecc";
+localparam      FIFO_MEMORY_TYPE    = FIFO_MEMORY;
+localparam      FULL_RESET_VALUE    = 0;
+localparam      PROG_EMPTY_THRESH   = 10;
+localparam      PROG_FULL_THRESH    = 10;
+localparam      SIM_ASSERT_CHK      = 1;
+localparam      USE_ADV_FEATURES    = USER_ADV_FEATURES;
+localparam      WAKEUP_TIME         = (FIFO_MEMORY_TYPE == "auto") ? 0 : 2;
+
+
+xpm_fifo_sync #(
+      .CASCADE_HEIGHT       (CASCADE_HEIGHT      ),       
+      .DOUT_RESET_VALUE     (DOUT_RESET_VALUE    ),    
+      .ECC_MODE             (ECC_MODE            ),     
+      .FIFO_MEMORY_TYPE     (FIFO_MEMORY_TYPE    ),
+      .FIFO_READ_LATENCY    (1),   
+      .FIFO_WRITE_DEPTH     (8), 
+      .FULL_RESET_VALUE     (FULL_RESET_VALUE    ),     
+      .PROG_EMPTY_THRESH    (PROG_EMPTY_THRESH   ),   
+      .PROG_FULL_THRESH     (PROG_FULL_THRESH    ),   
+      .RD_DATA_COUNT_WIDTH  (5 ),  
+      .READ_DATA_WIDTH      (ICMP_RX_TOTAL_WIDTH),   
+      .READ_MODE            ("fwft"              ),        
+      .SIM_ASSERT_CHK       (SIM_ASSERT_CHK      ),        
+      .USE_ADV_FEATURES     (USE_ADV_FEATURES    ), 
+      .WAKEUP_TIME          (WAKEUP_TIME         ),          
+      .WRITE_DATA_WIDTH     (ICMP_RX_TOTAL_WIDTH),     
+      .WR_DATA_COUNT_WIDTH  (5 )    
+)icmp_fifo (
+      .sleep                (0            ), 
+      .injectdbiterr        (1'b0         ),
+      .injectsbiterr        (1'b0         ), 
+      .almost_full          (icmp_payload_alful),   
+      .dout                 (icmp_payload_dout),      
+      .empty                (icmp_payload_empty),     
+      .wr_data_count        (icmp_payload_count),
+      .din                  (icmp_payload_din),
+      .rd_en                (icmp_payload_rden),               
+      .rst                  (~rx_axis_aresetn),                  
+      .wr_clk               (rx_axis_aclk),              
+      .wr_en                (icmp_payload_wren)
+);
+
 
 /***********************************************************************
  * Calculate the checksum for the received icmp data packets
