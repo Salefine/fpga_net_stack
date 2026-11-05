@@ -112,10 +112,6 @@ function    [15:0]  checksum_gen
   
 endfunction
 
-//-----------------------------------------------------------------------------
-//拼接循环计数: 用无符号32位, 与无符号的align_cnt/new_cnt运算
-//避免'-'/'<'混用signedness告警(integer为有符号)
-reg [31:0] j ;
 localparam
     s0  = 8'h01,
     s1  = 8'h02,
@@ -229,6 +225,11 @@ assign tcp_rx_axis_tready = (trx_state_reg == s0 || trx_state_reg == s1 || trx_s
 wire [15:0] tcp_hdr_bytes       = {10'd0, tcp_offset_reg[3:0], 2'b00};
 wire        tcp_seg_has_payload = (tcp_seg_len > tcp_hdr_bytes);
 
+//padding裁剪预译码(时序优化)：只依赖寄存器，缩短s2拍内的比较链
+wire        tcp_seg_big  = (tcp_seg_remain_reg[15:4] != 12'd0);   // remain >= 16
+wire        tcp_seg_mid  = ~tcp_seg_big & tcp_seg_remain_reg[3];   // 8 <= remain < 16
+wire        tcp_seg_done = (tcp_seg_remain_reg == 16'd0);
+
 always @ * begin 
     trx_state_next = trx_state_reg;
     tcp_client_ack_next = tcp_client_ack_reg;
@@ -329,11 +330,14 @@ always @ * begin
             if(tcp_rx_axis_tvalid & tcp_rx_axis_tready)begin 
                 //----------- padding裁剪：计算本拍在TCP段内的有效字节 ----------
                 //tcp_seg_remain_reg为0时，后续拍全是padding，只吞不处理。
-                if (tcp_seg_remain_reg >= 16'd8) begin
+                //时序优化：remain>=8时cur_tlast只需判 remain==8 且整拍8字节有效
+                //(count_valid_bytes(tkeep)<=8，故与原(remain<=count)等价)
+                if (tcp_seg_big || tcp_seg_mid) begin
                     tcp_cur_tkeep = tcp_rx_axis_tkeep;
-                    tcp_cur_tlast = (tcp_seg_remain_reg <= {12'h0, count_valid_bytes(tcp_rx_axis_tkeep)});
+                    tcp_cur_tlast = tcp_seg_mid && (tcp_seg_remain_reg[3:0] == 4'd8)
+                                    && (tcp_rx_axis_tkeep == 8'hff);
                     tcp_seg_remain_next = tcp_seg_remain_reg - {12'h0, count_valid_bytes(tcp_rx_axis_tkeep)};
-                end else if (tcp_seg_remain_reg > 16'd0) begin
+                end else if (!tcp_seg_done) begin
                     //TCP段在本拍内结束：截断到剩余字节数
                     tcp_cur_tkeep = (8'h01 << tcp_seg_remain_reg[2:0]) - 8'h01;
                     tcp_cur_tlast = 1'b1;
@@ -553,16 +557,30 @@ always @ (posedge clk) begin
 end
 
 //-----------------------------------------------------------------------------
-// 负载对齐级：按offset定位负载起点并跨拍拼接
+// 负载对齐级：按offset定位负载起点并跨拍拼接(两级流水)
 //   包头长度 = offset*4 字节，负载起始字节 = offset*4，
 //   即起始于第(offset>>1)拍(offset偶数时拍边界，奇数时该拍的lane4)。
 //   奇数offset的首个负载是半拍(4字节)，与下一拍的低4字节拼接成8字节整字
 //   后才写入payload FIFO，仅最后一字允许部分字节(tkeep)。
+//   流水结构(时序优化，原先"ip_type译码->对齐拼接->FIFO写"是一条13级
+//   组合逻辑的长路径)：
+//     stage-1 随拍锁存本拍新负载(裁剪padding/半拍移位后)、字节数、tlast，
+//             组合深度仅为裁剪多路+字节计数；
+//     stage-2 用锁存数据与hold缓冲做字节粒度桶形移位拼接，产生FIFO写
+//             端口信号，再经一级FIFO输入寄存器写入payload FIFO。
+//   payload FIFO为store-and-forward缓冲，加两拍延迟不影响功能：
+//   尾部部分字最迟在s7写描述符的前一拍写入FIFO(帧tlast拍计为m，
+//   则尾部字在m+3拍末写入，s7在m+4拍)。
 //-----------------------------------------------------------------------------
-reg [63:0]  tcp_payload_wdata;
+reg [63:0]  tcp_payload_wdata;         //stage-2组合输出
 reg [7:0]   tcp_payload_wkeep;
-reg          tcp_payload_wlast;
-reg          tcp_payload_wren;
+reg         tcp_payload_wlast;
+reg         tcp_payload_wren;
+
+reg [63:0]  tcp_payload_wdata_reg;     //FIFO输入寄存级
+reg [7:0]   tcp_payload_wkeep_reg;
+reg         tcp_payload_wlast_reg;
+reg         tcp_payload_wren_reg;
 
 reg [63:0]  tcp_align_hold_next, tcp_align_hold_reg = 'b0;
 reg [3:0]   tcp_align_cnt_next,  tcp_align_cnt_reg  = 'b0;
@@ -570,11 +588,17 @@ reg         tcp_align_flush_next,tcp_align_flush_reg= 'b0;
 
 //负载字节数累加见FSM前的tcp_pay_cnt_*声明
 
-reg [63:0]  tcp_pay_new_data;
-reg [7:0]   tcp_pay_new_keep;
-reg [3:0]   tcp_new_cnt;
+reg [63:0]  tcp_pay_new_data;          //stage-1组合：本拍新负载(已移位到字节0)
+reg [3:0]   tcp_new_cnt;               //stage-1组合：本拍新负载字节数
+reg         tcp_pay_new_hs;            //stage-1组合：本拍为携带负载的有效拍
+
+reg [63:0]  tcp_pay_new_data_reg;      //stage-1寄存
+reg [3:0]   tcp_new_cnt_reg;
+reg         tcp_pay_tlast_reg;
+reg         tcp_pay_hs_reg;
+reg         tcp_frame_start_reg;       //新帧首拍指示(延迟一拍清空stage-2状态)
+
 reg [127:0] tcp_comb_vec;
-reg [127:0] tcp_new_ext;
 reg [3:0]   tcp_total_cnt;
 
 wire        tcp_pay_hs = (trx_state_reg == s2) && tcp_rx_axis_tvalid && tcp_rx_axis_tready;
@@ -585,10 +609,47 @@ wire        tcp_pay_full_beat  = tcp_seg_has_payload
                                  && ((tcp_beat_cnt_reg >  tcp_pay_start_beat)
                                  ||  ((tcp_beat_cnt_reg == tcp_pay_start_beat) && !tcp_offset_reg[0]));
 
+//stage-1：当前拍内的新负载字节(奇数offset的起始拍只取lane4~7)，
+//注意用截断后的tcp_cur_tkeep(已去除padding)，而非AXIS原始tkeep
 always @ * begin
+    if (tcp_pay_first_half) begin
+        tcp_pay_new_data = tcp_rx_axis_tdata >> 32;
+        tcp_new_cnt      = count_valid_bytes(tcp_cur_tkeep >> 4);
+    end else begin
+        tcp_pay_new_data = tcp_rx_axis_tdata;
+        tcp_new_cnt      = count_valid_bytes(tcp_cur_tkeep);
+    end
+    tcp_pay_new_hs = tcp_pay_hs && (tcp_pay_first_half || tcp_pay_full_beat);
+end
+
+always @(posedge clk) begin
+    if (rst) begin
+        tcp_pay_new_data_reg <= 'b0;
+        tcp_new_cnt_reg      <= 'b0;
+        tcp_pay_tlast_reg    <= 1'b0;
+        tcp_pay_hs_reg       <= 1'b0;
+        tcp_frame_start_reg  <= 1'b0;
+    end else begin
+        tcp_pay_new_data_reg <= tcp_pay_new_data;
+        tcp_new_cnt_reg      <= tcp_new_cnt;
+        tcp_pay_tlast_reg    <= tcp_cur_tlast;
+        tcp_pay_hs_reg       <= tcp_pay_new_hs;
+        tcp_frame_start_reg  <= (trx_state_reg == s0) && tcp_rx_axis_tvalid && tcp_rx_axis_tready;
+    end
+end
+
+//stage-2：拼接缓冲，低字节为hold中未满一字的旧字节，其后紧跟新字节。
+//字节粒度桶形移位+按位或替代原逐字节比较/动态索引(原写法综合出
+//CARRY8比较链，位于FIFO写数据的关键路径上)；移位后无效字节位置的内容
+//为无关项(使用处均由字节数/tkeep界定，与原逐字节填0语义等价)。
+always @ * begin
+    tcp_comb_vec  = {64'd0, tcp_align_hold_reg}
+                  | ({64'd0, tcp_pay_new_data_reg} << {tcp_align_cnt_reg, 3'b000});
+    tcp_total_cnt = tcp_align_cnt_reg + tcp_new_cnt_reg;
+
     tcp_payload_wdata    = 'b0;
     tcp_payload_wkeep    = 'b0;
-    tcp_payload_wlast    = 'b0;
+    tcp_payload_wlast    = 1'b0;
     tcp_payload_wren     = 'b0;
     tcp_align_hold_next  = tcp_align_hold_reg;
     tcp_align_cnt_next   = tcp_align_cnt_reg;
@@ -596,46 +657,14 @@ always @ * begin
     tcp_has_data_next    = tcp_has_data_reg;
     tcp_pay_cnt_next     = tcp_pay_cnt_reg;
 
-    //新帧的第一拍：清空对齐缓冲
-    if ((trx_state_reg == s0) && tcp_rx_axis_tvalid && tcp_rx_axis_tready) begin
+    //新帧的第一拍(延迟一拍)：清空对齐缓冲与字节计数
+    if (tcp_frame_start_reg) begin
         tcp_align_hold_next  = 'b0;
         tcp_align_cnt_next   = 4'd0;
         tcp_align_flush_next = 1'b0;
         tcp_has_data_next    = 1'b0;
         tcp_pay_cnt_next     = 16'd0;
     end
-
-    //当前拍内的新负载字节：奇数offset的起始拍只取lane4~7
-    //注意用截断后的tcp_cur_tkeep(已去除padding)，而非AXIS原始tkeep
-    if (tcp_pay_first_half) begin
-        tcp_pay_new_data = tcp_rx_axis_tdata >> 32;
-        tcp_pay_new_keep = tcp_cur_tkeep >> 4;
-    end else begin
-        tcp_pay_new_data = tcp_rx_axis_tdata;
-        tcp_pay_new_keep = tcp_cur_tkeep;
-    end
-    tcp_new_cnt = count_valid_bytes(tcp_pay_new_keep);
-
-    //拼接缓冲：低地址为旧字节 hold||new，最多15字节
-    //hold最多7字节(align_cnt<=7), 只有j<8才可能读hold;
-    //new数据零扩展到128位后按(j-cnt)字节偏移读取,
-    //所有part-select均不越界(修复Synth 8-524)
-    tcp_new_ext = {64'd0, tcp_pay_new_data};
-    for (j = 0; j < 8; j = j + 1) begin
-        if (j < tcp_align_cnt_reg)
-            tcp_comb_vec[j*8 +: 8] = tcp_align_hold_reg[j*8 +: 8];
-        else if ((j - tcp_align_cnt_reg) < tcp_new_cnt)
-            tcp_comb_vec[j*8 +: 8] = tcp_new_ext[(j - tcp_align_cnt_reg)*8 +: 8];
-        else
-            tcp_comb_vec[j*8 +: 8] = 8'h00;
-    end
-    for (j = 8; j < 16; j = j + 1) begin
-        if ((j - tcp_align_cnt_reg) < tcp_new_cnt)
-            tcp_comb_vec[j*8 +: 8] = tcp_new_ext[(j - tcp_align_cnt_reg)*8 +: 8];
-        else
-            tcp_comb_vec[j*8 +: 8] = 8'h00;
-    end
-    tcp_total_cnt = tcp_align_cnt_reg + tcp_new_cnt;
 
     if (tcp_align_flush_reg) begin
         //tlast后剩余的尾部部分字，本拍补发
@@ -646,25 +675,25 @@ always @ * begin
         tcp_has_data_next    = 1'b1;
         tcp_align_cnt_next   = 4'd0;
         tcp_align_flush_next = 1'b0;
-    end else if (tcp_pay_hs && (tcp_pay_first_half || tcp_pay_full_beat)) begin
-        tcp_pay_cnt_next = tcp_pay_cnt_reg + {12'd0, tcp_new_cnt};
+    end else if (tcp_pay_hs_reg) begin
+        tcp_pay_cnt_next = tcp_pay_cnt_reg + {12'd0, tcp_new_cnt_reg};
         if (tcp_total_cnt >= 4'd8) begin
             //拼接出8字节整字
             tcp_payload_wdata    = tcp_comb_vec[63:0];
             tcp_payload_wkeep    = 8'hff;
-            tcp_payload_wlast    = tcp_cur_tlast && (tcp_total_cnt == 4'd8);
+            tcp_payload_wlast    = tcp_pay_tlast_reg && (tcp_total_cnt == 4'd8);
             tcp_payload_wren     = 1'b1;
             tcp_has_data_next    = 1'b1;
             tcp_align_hold_next  = tcp_comb_vec[127:64];
             tcp_align_cnt_next   = tcp_total_cnt - 4'd8;
-            if (tcp_cur_tlast && (tcp_total_cnt > 4'd8)) begin
+            if (tcp_pay_tlast_reg && (tcp_total_cnt > 4'd8)) begin
                 tcp_align_flush_next = 1'b1;
             end
         end else begin
             //不足一字：攒到下一拍
             tcp_align_hold_next = tcp_comb_vec[63:0];
             tcp_align_cnt_next  = tcp_total_cnt;
-            if (tcp_cur_tlast && (tcp_total_cnt > 4'd0)) begin
+            if (tcp_pay_tlast_reg && (tcp_total_cnt > 4'd0)) begin
                 tcp_align_flush_next = 1'b1;
             end
         end
@@ -684,6 +713,21 @@ always @(posedge clk) begin
         tcp_align_flush_reg <= tcp_align_flush_next;
         tcp_has_data_reg    <= tcp_has_data_next;
         tcp_pay_cnt_reg     <= tcp_pay_cnt_next;
+    end
+end
+
+//FIFO输入寄存级：切断对齐逻辑与xpm FIFO内部写路径的时序级联
+always @(posedge clk) begin
+    if (rst) begin
+        tcp_payload_wdata_reg  <= 'b0;
+        tcp_payload_wkeep_reg  <= 'b0;
+        tcp_payload_wlast_reg  <= 1'b0;
+        tcp_payload_wren_reg   <= 1'b0;
+    end else begin
+        tcp_payload_wdata_reg  <= tcp_payload_wdata;
+        tcp_payload_wkeep_reg  <= tcp_payload_wkeep;
+        tcp_payload_wlast_reg  <= tcp_payload_wlast;
+        tcp_payload_wren_reg   <= tcp_payload_wren;
     end
 end
 
@@ -718,13 +762,13 @@ xpm_fifo_sync #(
                               tcp_payload_keep,
                               tcp_payload_data} ),
       .empty                (tcp_payload_empty  ),
-      .din                  ({tcp_payload_wlast,
-                              tcp_payload_wkeep,
-                              tcp_payload_wdata}),
+      .din                  ({tcp_payload_wlast_reg,
+                              tcp_payload_wkeep_reg,
+                              tcp_payload_wdata_reg}),
       .rd_en                (tcp_payload_rden   ),
       .rst                  (rst                ),
       .wr_clk               (clk                ),
-      .wr_en                (tcp_payload_wren   )
+      .wr_en                (tcp_payload_wren_reg)
 );
 
 //-----------------------------------------------------------------------------

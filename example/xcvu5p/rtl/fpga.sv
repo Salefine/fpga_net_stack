@@ -200,17 +200,9 @@ wire [7:0]  sfp0_rxc_int;
 (* MARK_DEBUG="true" *)wire         app_rx_axis_tlast ;
 
 
-
-/*
- * eth_xcvr_phy_quad_wrapper: Quad PHY wrapper module
- * - Interface: XGMII
- */
-
-
-
-
 assign clk_156mhz_int = sfp0_tx_clk_int;
 assign rst_156mhz_int = sfp0_tx_rst_int;
+
 
 eth_xcvr_phy_quad_wrapper #(
     .COUNT(COUNT)
@@ -300,10 +292,6 @@ eth_mac_10g_fifo_inst (
     .cfg_tx_enable  (1'b1),
     .cfg_rx_enable  (1'b1)
 );
-
-
-
-
 
 /*
  * udp stack_top: UDP stack top module
@@ -462,44 +450,33 @@ endgenerate
  *  - Interface: AXI4-Stream
  */
 
-generate
-    if(`TCP_ECHO_TEST ==1)begin
-        //-----------------------------for tcp echo testing-----------------------//
-        axis_data_fifo_0 tcp_data_fifo (
-          .s_axis_aresetn   (~rst_156mhz_int),       
-          .s_axis_aclk      (clk_156mhz_int),    
 
-          .s_axis_tvalid    (app_rx_axis_tvalid),     
-          .s_axis_tready    (app_rx_axis_tready),     
-          .s_axis_tdata     (app_rx_axis_tdata),       
-          .s_axis_tkeep     (app_rx_axis_tkeep),       
-          .s_axis_tlast     (app_rx_axis_tlast),   
+//-----------------------------for tcp speed testing-----------------------//
+send_axis #(
+   .STREAM_TDATA_WIDTH 	(64   ),
+   .MODE(1),
+   .S_AXIS_FIFO_SYNC(1)   // 回环两侧同为clk_156mhz_int, 用同步FIFO避免复位网负载恶化
+)echo_tcp_test(
+   .m_axis_aclk    	(clk_156mhz_int),
+   .m_axis_aresetn 	(~rst_156mhz_int),
+   .st_length      	(st_length),
+   .st_start       	(st_start),
+   .st_end         	(st_end),
+   .m_axis_tdata   	(app_tx_axis_tdata),
+   .m_axis_tkeep   	(app_tx_axis_tkeep),
+   .m_axis_tlast   	(app_tx_axis_tlast),
+   .m_axis_tvalid  	(app_tx_axis_tvalid),
+   .m_axis_tready  	(app_tx_axis_tready),
 
-          .m_axis_tvalid    (app_tx_axis_tvalid),     
-          .m_axis_tready    (app_tx_axis_tready),     
-          .m_axis_tdata     (app_tx_axis_tdata),       
-          .m_axis_tkeep     (app_tx_axis_tkeep),       
-          .m_axis_tlast     (app_tx_axis_tlast)
-        );        
-    end
-    else begin 
-        //-----------------------------for tcp speed testing-----------------------//
-        send_axis #(
-           .STREAM_TDATA_WIDTH 	(64   )
-        )app_gen(
-           .m_axis_aclk    	(clk_156mhz_int),
-           .m_axis_aresetn 	(~rst_156mhz_int),
-           .st_length      	(st_length),
-           .st_start       	(st_start),
-           .st_end         	(st_end),
-           .m_axis_tdata   	(app_tx_axis_tdata),
-           .m_axis_tkeep   	(app_tx_axis_tkeep),
-           .m_axis_tlast   	(app_tx_axis_tlast),
-           .m_axis_tvalid  	(app_tx_axis_tvalid),
-           .m_axis_tready  	(app_tx_axis_tready)
-        );
-    end
-endgenerate
+   .s_axis_aclk    	(clk_156mhz_int),
+   .s_axis_aresetn 	(~rst_156mhz_int),
+   .s_axis_tdata   	(app_rx_axis_tdata),
+   .s_axis_tkeep   	(app_rx_axis_tkeep),
+   .s_axis_tlast   	(app_rx_axis_tlast),
+   .s_axis_tvalid  	(app_rx_axis_tvalid),
+   .s_axis_tready  	(app_rx_axis_tready)
+);
+
 
 endmodule
 

@@ -203,3 +203,37 @@ ees@ees-zhi: sudo tcpdump -i enp7s0 -nn -s 0 -w test.pcap
 ```http
 https://github.com/alexforencich/verilog-ethernet
 ```
+
+
+
+## :end: 时序性能
+
+### :alien: 优化结果
+
+| 时钟域                                                 | 优化前 WNS | 优化后 WNS  | 说明                          |
+| ------------------------------------------------------ | ---------- | ----------- | ----------------------------- |
+| **clk_156mhz_int**（156.25MHz，TCP/IP 栈全部用户逻辑） | 1.499      | **2.239** ✓ | 达到 2.0 目标，提升 0.74ns    |
+| sfp0_rx_clk_int                                        | 2.722      | 3.624       |                               |
+| 整体设计                                               | 1.499      | 1.935       | 受 GT IP 内部路径限制（见下） |
+
+时序全部满足，bitstream 已生成（`fpga.runs/impl_1/fpga.bit`），0 未布线网络。
+
+### :alembic: 优化内容
+
+1. **`tcp_stack_top.v`** — ip→tcp 解复用后插入一级寄存切片，切断「ip_type 译码 → tcp_rx」组合路径的头部；`tcp_paylen`/`recv_*_ip_addr` 元数据在同一使能下延迟一拍与 AXIS 对齐（处理了寄存级保持未消费拍的配对问题）
+2. **`tcp_rx.v`** — 原 13 级逻辑的关键路径（ip_type → 对齐拼接 → payload FIFO BRAM 写口）重构为：
+   - stage-1：随拍锁存新负载字节/字节数/tlast（组合深度只剩裁剪+计数）
+   - stage-2：桶形移位+按位或拼接（替代逐字节动态索引比较，消除了综合出的 CARRY8 链），输出经 FIFO 输入寄存级写入 xpm FIFO
+   - s2 的 `cur_tlast` 比较链改为高位预译码（与原逻辑严格等价）
+3. **`tcp_tx.v`** — `cks_s4` 中两级 `checksum_gen` 级联拆成两拍（新增 `cks_s5` 状态），消除 tcp_tx 的关键路径
+
+### :book: 整体 1.935ns 的说明
+
+唯一低于 2.0 的路径在 **GT 向导 IP 内部**（powergood 延迟计数器，322MHz `txoutclkpcs` PCS 时钟域）：0 级逻辑、纯布线（同 slice 内 1.06ns 布线）。该路径**原设计就是 1.848**，一直低于 2.0，与本次改动无关。
+
+fabric 逻辑新的临界路径在 ARP 模块（2.239ns），若后续还想再提升可以继续优化那里。
+
+
+
+
+

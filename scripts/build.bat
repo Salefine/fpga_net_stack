@@ -333,7 +333,6 @@ foreach f {
     rtl/mac/eth_mac_10g_fifo.v
     rtl/mac/mac_pause_ctrl_rx.v
     rtl/mac/axis_async_fifo.v
-    rtl/xpm_sync_fifo.v
     rtl/udp/udp_tx.v
     rtl/udp/udp_layer.v
     rtl/udp/udp_rx.v

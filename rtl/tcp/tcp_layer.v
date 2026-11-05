@@ -279,9 +279,9 @@ eth_arb_tcp_tx_inst (
     .rst(rst),
     // no Ethernet header descriptor at this level (IP encapsulation
     // happens downstream in ip_tx)
-    .s_eth_dest_mac             ({'b0, 'b0}),
-    .s_eth_src_mac              ({'b0, 'b0}),
-    .s_eth_type                 ({'b0, 'b0}),
+    .s_eth_dest_mac             ({48'b0, 48'b0}),
+    .s_eth_src_mac              ({48'b0, 48'b0}),
+    .s_eth_type                 ({8'b0, 8'b0}),
     //---------------------- Ethernet frame inputs---------------------//
     .s_eth_payload_axis_tdata   ({tcp_data_axis_tdata , tcp_ctrl_axis_tdata }),
     .s_eth_payload_axis_tkeep   ({tcp_data_axis_tkeep , tcp_ctrl_axis_tkeep }),

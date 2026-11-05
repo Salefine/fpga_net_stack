@@ -433,12 +433,56 @@ assign mac2frame_rx_axis_tready = (eth_rx_type == 16'h0806) ? frame2arp_rx_axis_
 // here would wedge ip_rx and stall the whole receive path permanently.
 // ICMP backpressure (icmp_rx accepts only while parsing a frame and its
 // payload FIFO has room) now propagates through the demux.
-assign ip2tcp_rx_axis_tdata  = (ip_type == 16'h0006) ? ip2frame_rx_axis_tdata  : 64'h0;
-assign ip2tcp_rx_axis_tkeep  = (ip_type == 16'h0006) ? ip2frame_rx_axis_tkeep  : 8'h0 ;
-assign ip2tcp_rx_axis_tvalid = (ip_type == 16'h0006) ? ip2frame_rx_axis_tvalid : 1'b0 ;
-assign ip2tcp_rx_axis_tlast  = (ip_type == 16'h0006) ? ip2frame_rx_axis_tlast  : 1'b0 ;
-assign ip2tcp_rx_axis_tuser  = (ip_type == 16'h0006) ? ip2frame_rx_axis_tuser  : 1'b0 ;
-assign ip2frame_rx_axis_tready = (ip_type == 16'h0006) ? ip2tcp_rx_axis_tready :
+//
+// ip->tcp方向插入一级寄存(时序优化)：ip_type译码/数据选择与tcp_rx内部的
+// 对齐拼接、payload FIFO写路径原本级联成一条超长组合路径。
+// ip_rx在帧内保持ip_type/长度/地址稳定(HEADER0仅在out_fifo排空后接收
+// 新帧)，但下一帧HEADER0拍末就可能更新这些元数据；为与寄存级中的AXIS
+// 严格对齐(包括寄存级保持未消费拍的场景)，tcp_layer使用的元数据
+// (tcp_paylen/recv_*_ip_addr)在同一使能下延迟一拍。
+reg  [63:0] ip2tcp_rx_tdata_r  = 64'h0;
+reg  [7:0]  ip2tcp_rx_tkeep_r  = 8'h0;
+reg         ip2tcp_rx_tvalid_r = 1'b0;
+reg         ip2tcp_rx_tlast_r  = 1'b0;
+reg         ip2tcp_rx_tuser_r  = 1'b0;
+
+reg  [31:0] tcp_recv_src_ip_addr_r = 32'h0;
+reg  [31:0] tcp_recv_dst_ip_addr_r = 32'h0;
+reg  [15:0] tcp_paylen_r           = 16'h0;
+
+wire        ip2tcp_rx_in_ready = ~ip2tcp_rx_tvalid_r | ip2tcp_rx_axis_tready;
+
+always @(posedge clk) begin
+    if (rst) begin
+        ip2tcp_rx_tvalid_r      <= 1'b0;
+        ip2tcp_rx_tdata_r       <= 64'h0;
+        ip2tcp_rx_tkeep_r       <= 8'h0;
+        ip2tcp_rx_tlast_r       <= 1'b0;
+        ip2tcp_rx_tuser_r       <= 1'b0;
+        tcp_recv_src_ip_addr_r  <= 32'h0;
+        tcp_recv_dst_ip_addr_r  <= 32'h0;
+        tcp_paylen_r            <= 16'h0;
+    end
+    else if (ip2tcp_rx_in_ready) begin
+        //捕获本拍输入(空或正在排空时均可接收，保持1拍/周期的吞吐)
+        ip2tcp_rx_tdata_r  <= (ip_type == 16'h0006) ? ip2frame_rx_axis_tdata  : 64'h0;
+        ip2tcp_rx_tkeep_r  <= (ip_type == 16'h0006) ? ip2frame_rx_axis_tkeep  : 8'h0 ;
+        ip2tcp_rx_tvalid_r <= (ip_type == 16'h0006) ? ip2frame_rx_axis_tvalid : 1'b0 ;
+        ip2tcp_rx_tlast_r  <= (ip_type == 16'h0006) ? ip2frame_rx_axis_tlast  : 1'b0 ;
+        ip2tcp_rx_tuser_r  <= (ip_type == 16'h0006) ? ip2frame_rx_axis_tuser  : 1'b0 ;
+        //元数据随捕获节拍延迟，保证寄存级中保持的拍始终配对正确的元数据
+        tcp_recv_src_ip_addr_r  <= recv_src_ip_addr;
+        tcp_recv_dst_ip_addr_r  <= recv_dst_ip_addr;
+        tcp_paylen_r            <= tcp_paylen;
+    end
+end
+
+assign ip2tcp_rx_axis_tdata  = ip2tcp_rx_tdata_r;
+assign ip2tcp_rx_axis_tkeep  = ip2tcp_rx_tkeep_r;
+assign ip2tcp_rx_axis_tvalid = ip2tcp_rx_tvalid_r;
+assign ip2tcp_rx_axis_tlast  = ip2tcp_rx_tlast_r;
+assign ip2tcp_rx_axis_tuser  = ip2tcp_rx_tuser_r;
+assign ip2frame_rx_axis_tready = (ip_type == 16'h0006) ? ip2tcp_rx_in_ready :
                                  (ip_type == 16'h0001) ? ip2icmp_rx_axis_tready :
                                  1'b1;
 
@@ -698,12 +742,12 @@ tcp_layer #(
 ) tcp_layer_inst (
     .src_ip_addr(src_ip_addr),
     .dst_ip_addr(dst_ip_addr),
-    .recv_src_ip_addr(recv_src_ip_addr),
-    .recv_dst_ip_addr(recv_dst_ip_addr),
+    .recv_src_ip_addr(tcp_recv_src_ip_addr_r),
+    .recv_dst_ip_addr(tcp_recv_dst_ip_addr_r),
     .tcp_src_port(tcp_src_port),
     .tcp_dst_port(tcp_dst_port),
     .tcp_linkup(tcp_linkup),
-    .tcp_paylen(tcp_paylen),
+    .tcp_paylen(tcp_paylen_r),
     .clk(clk),
     .rst(rst),
 

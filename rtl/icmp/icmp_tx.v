@@ -269,7 +269,7 @@ xpm_fifo_sync #(
       .ECC_MODE             (ECC_MODE            ),     
       .FIFO_MEMORY_TYPE     (FIFO_MEMORY_TYPE    ),
       .FIFO_READ_LATENCY    (1),   
-      .FIFO_WRITE_DEPTH     (8), 
+      .FIFO_WRITE_DEPTH     (128), 
       .FULL_RESET_VALUE     (FULL_RESET_VALUE    ),     
       .PROG_EMPTY_THRESH    (PROG_EMPTY_THRESH   ),   
       .PROG_FULL_THRESH     (PROG_FULL_THRESH    ),   

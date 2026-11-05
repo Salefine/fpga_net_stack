@@ -363,13 +363,14 @@ xpm_fifo_sync #(
       .wr_en                (tcp_checksum_fifo_wren)           
 );
 
-localparam  [4:0] s0 = 5'b00001;
-localparam  [4:0] s1 = 5'b00010;
-localparam  [4:0] s2 = 5'b00100;
-localparam  [4:0] s3 = 5'b01000;
-localparam  [4:0] cks_s4 = 5'b10000;
+localparam  [5:0] s0 = 6'b000001;
+localparam  [5:0] s1 = 6'b000010;
+localparam  [5:0] s2 = 6'b000100;
+localparam  [5:0] s3 = 6'b001000;
+localparam  [5:0] cks_s4 = 6'b010000;
+localparam  [5:0] cks_s5 = 6'b100000;
 
-reg [4:0] cks_state_next, cks_state_reg = s0;
+reg [5:0] cks_state_next, cks_state_reg = s0;
 reg [15:0] checksum_payload4_next,checksum_payload4_reg = 'b0;
 reg [15:0] checksum_payload5_next,checksum_payload5_reg = 'b0;
 reg [15:0] checksum_payload6_next,checksum_payload6_reg = 'b0;
@@ -383,6 +384,7 @@ reg [15:0] checksum_header4_next, checksum_header4_reg = 'b0;
 reg [15:0] checksum_header5_next, checksum_header5_reg = 'b0;
 reg [15:0] checksum_header6_next, checksum_header6_reg = 'b0;
 reg [15:0] checksum_header7_next, checksum_header7_reg = 'b0;
+reg [15:0] checksum_header8_next, checksum_header8_reg = 'b0;
 
 reg [15:0] checksum_payload_next, checksum_payload_reg   = 0;
 reg  tcp_desc_fifo_wr_next , tcp_desc_fifo_wr_reg = 'b0;
@@ -408,6 +410,7 @@ always @(*) begin
     checksum_header5_next = checksum_header5_reg;
     checksum_header6_next = checksum_header6_reg;
     checksum_header7_next = checksum_header7_reg;
+    checksum_header8_next = checksum_header8_reg;
     //-------------------------------------------------------
     checksum_payload_next = checksum_payload_reg;
 
@@ -461,10 +464,16 @@ always @(*) begin
             cks_state_next = cks_s4;
         end
 
-        // 第4级：最终校验和 = ~(负载和 + 头和)
+        // 第5级：头和折叠(时序优化：原第4级中两级checksum_gen级联是
+        // tcp_tx的关键路径，拆成两拍)
         cks_s4 : begin
-            checksum_payload_next = ~checksum_gen(checksum_payload6_reg,
-                                    checksum_gen(checksum_header5_reg,checksum_header4_reg));
+            checksum_header8_next = checksum_gen(checksum_header5_reg , checksum_header4_reg);
+            cks_state_next = cks_s5;
+        end
+
+        // 第6级：最终校验和 = ~(负载和 + 头和)
+        cks_s5 : begin
+            checksum_payload_next = ~checksum_gen(checksum_payload6_reg, checksum_header8_reg);
             if (checksum_payload_next == 16'd0) begin
                 checksum_payload_next = 16'hFFFF;
             end
@@ -492,6 +501,7 @@ always @(posedge clk) begin
         checksum_header5_reg <= 'b0;
         checksum_header6_reg <= 'b0;
         checksum_header7_reg <= 'b0;
+        checksum_header8_reg <= 'b0;
 
         checksum_payload_reg <= 'b0;
         tcp_desc_fifo_wr_reg <= 'b0;
@@ -511,6 +521,7 @@ always @(posedge clk) begin
         checksum_header5_reg <= checksum_header5_next;
         checksum_header6_reg <= checksum_header6_next;
         checksum_header7_reg <= checksum_header7_next;
+        checksum_header8_reg <= checksum_header8_next;
 
         checksum_payload_reg <= checksum_payload_next;
         tcp_desc_fifo_wr_reg <= tcp_desc_fifo_wr_next;

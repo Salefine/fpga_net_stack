@@ -26,8 +26,12 @@ module send_axis#(
     parameter STREAM_TKEEP_WIDTH = STREAM_TDATA_WIDTH / 8,
     parameter STREAM_TOTAL_WIDTH = STREAM_TDATA_WIDTH + STREAM_TKEEP_WIDTH + 2,
     parameter MODE = 1,                    // 1: internal test-pattern generator
-                                            // 0: async s_axis input (xpm_fifo_async CDC)
-    parameter S_AXIS_FIFO_ADDR_WIDTH = 10  // MODE=0: async FIFO depth = 2**S_AXIS_FIFO_ADDR_WIDTH
+                                            // 0: s_axis input buffered by an internal FIFO
+    parameter S_AXIS_FIFO_ADDR_WIDTH = 10, // MODE=0: FIFO depth = 2**S_AXIS_FIFO_ADDR_WIDTH
+    parameter S_AXIS_FIFO_SYNC = 0         // MODE=0 FIFO primitive: 0: xpm_fifo_async (CDC)
+                                            //   1: xpm_fifo_sync — use when s_axis_aclk == m_axis_aclk
+                                            //   (回环等同钟场景; async FIFO 双域复位FSM会给复位网
+                                            //    增加大量门控LUT负载, 拉长原始复位网布线)
 )(
     input  wire                                 m_axis_aclk,
     input  wire                                 m_axis_aresetn,
@@ -201,6 +205,45 @@ generate
         wire                                              s_axis_fifo_alful;
         wire                                              s_axis_fifo_rden;
 
+        /* 同钟(S_AXIS_FIFO_SYNC=1)时用xpm_fifo_sync: 省去async FIFO内部
+         * 两套复位同步FSM与Gray码指针同步链, 数据通路少2~3拍, 且不给
+         * 复位网增加门控LUT负载; rst由调用方保证与clk同步 */
+        if (S_AXIS_FIFO_SYNC != 0) begin : gen_fifo_sync
+
+            xpm_fifo_sync #(
+                  .CASCADE_HEIGHT       (0                                            ),
+                  .DOUT_RESET_VALUE     ("0"                                          ),
+                  .ECC_MODE             ("no_ecc"                                     ),
+                  .FIFO_MEMORY_TYPE     ("auto"                                       ),
+                  .FIFO_READ_LATENCY    (0                                            ),
+                  .FIFO_WRITE_DEPTH     (2**S_AXIS_FIFO_ADDR_WIDTH                    ),
+                  .FULL_RESET_VALUE     (0                                            ),
+                  .PROG_EMPTY_THRESH    (10                                           ),
+                  .PROG_FULL_THRESH     (2**S_AXIS_FIFO_ADDR_WIDTH - 10               ),
+                  .RD_DATA_COUNT_WIDTH  (S_AXIS_FIFO_ADDR_WIDTH + 1                   ),
+                  .READ_DATA_WIDTH      (STREAM_TDATA_WIDTH + STREAM_TKEEP_WIDTH + 1  ),
+                  .READ_MODE            ("fwft"                                       ),
+                  .SIM_ASSERT_CHK       (0                                            ),
+                  .USE_ADV_FEATURES     ("1f1f"                                       ),
+                  .WAKEUP_TIME          (0                                            ),
+                  .WRITE_DATA_WIDTH     (STREAM_TDATA_WIDTH + STREAM_TKEEP_WIDTH + 1  ),
+                  .WR_DATA_COUNT_WIDTH  (S_AXIS_FIFO_ADDR_WIDTH + 1                   )
+            ) s_axis_fifo (
+                  .sleep                (1'b0                                         ),
+                  .injectdbiterr        (1'b0                                         ),
+                  .injectsbiterr        (1'b0                                         ),
+                  .almost_full          (s_axis_fifo_alful                            ),
+                  .dout                 (s_axis_fifo_dout                             ),
+                  .empty                (s_axis_fifo_empty                            ),
+                  .din                  ({s_axis_tlast, s_axis_tkeep, s_axis_tdata}   ),
+                  .rd_en                (s_axis_fifo_rden                             ),
+                  .rst                  (~s_axis_aresetn                              ),
+                  .wr_en                (s_axis_tvalid & s_axis_tready                ),
+                  .wr_clk               (m_axis_aclk                                  )
+            );
+
+        end else begin : gen_fifo_async
+
         xpm_fifo_async #(
               .CASCADE_HEIGHT       (0                                            ),
               .DOUT_RESET_VALUE     ("0"                                          ),
@@ -234,6 +277,8 @@ generate
               .wr_clk               (s_axis_aclk                                  ),
               .wr_en                (s_axis_tvalid & s_axis_tready                )
         );
+
+        end
 
         // accept while the FIFO has room; the almost_full margin keeps
         // the accepted write from overflowing the FIFO
