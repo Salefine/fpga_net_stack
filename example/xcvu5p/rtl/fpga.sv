@@ -9,7 +9,7 @@
  * ___________________________________________________________________________
  * |    Date       |  Version    |       Author     |       Description      |
  * |---------------|-------------|------------------|------------------------|
- * |               |   v1.0      |    zzhi          | Support 10Gbps         |
+ * |               |   v1.0      |    zzhi          |                        |
  * |---------------|-------------|------------------|------------------------|
  * 
  * @copyright Copyright (c) 2026 zzhi
@@ -350,49 +350,50 @@ end
 
 generate 
     if(TCP == 1) begin:tcp_stack
-    tcp_stack_top tcp_stack_inst (
-        //------------------- Clocks and resets ---------------//
-        .clk(clk_156mhz_int),
-        .rst(rst_156mhz_int),
-        //------------------- MAC interface -------------------//
-        .mac_rx_axis_tdata   (mac_fifo_rx_axis_tdata ),
-        .mac_rx_axis_tkeep   (mac_fifo_rx_axis_tkeep ),
-        .mac_rx_axis_tvalid  (mac_fifo_rx_axis_tvalid),
-        .mac_rx_axis_tready  (mac_fifo_rx_axis_tready),
-        .mac_rx_axis_tlast   (mac_fifo_rx_axis_tlast ),
-        .mac_rx_axis_tuser   (mac_fifo_rx_axis_tuser ),
-        .mac_tx_axis_tdata   (mac_fifo_tx_axis_tdata ),
-        .mac_tx_axis_tkeep   (mac_fifo_tx_axis_tkeep ),
-        .mac_tx_axis_tvalid  (mac_fifo_tx_axis_tvalid),
-        .mac_tx_axis_tready  (mac_fifo_tx_axis_tready),
-        .mac_tx_axis_tlast   (mac_fifo_tx_axis_tlast ),
-        .mac_tx_axis_tuser   (mac_fifo_tx_axis_tuser ),
-        //------------------- TCP interface -------------------//
-        .app_tx_axis_tdata  (app_tx_axis_tdata ),
-        .app_tx_axis_tkeep  (app_tx_axis_tkeep ),
-        .app_tx_axis_tvalid (app_tx_axis_tvalid),
-        .app_tx_axis_tlast  (app_tx_axis_tlast ),
-        .app_tx_axis_tready (app_tx_axis_tready),
-        
-    	.app_rx_axis_tdata  (app_rx_axis_tdata ),
-        .app_rx_axis_tkeep  (app_rx_axis_tkeep ),
-        .app_rx_axis_tvalid (app_rx_axis_tvalid),
-        .app_rx_axis_tlast  (app_rx_axis_tlast ),
-        .app_rx_axis_tuser  (),
-        .app_rx_axis_tready (app_rx_axis_tready),
-        //------------------- Configuration -------------------//
-        .desc_axis_tvalid   (desc_axis_tvalid),
-        .desc_axis_tready   (desc_axis_tready),
-        .configuration_done (configuration_done),
-        .src_ip_addr        (local_ip_addr),
-        .gateway_ip_addr    (gateway_ip_addr),
-        .subnet_mask        (subnet_mask),
-        .tcp_linkup          (tcp_linkup),
-        .dst_ip_addr        (dst_ip_addr),
-        .src_mac_addr       (local_mac_addr),
-        .tcp_src_port       (local_tcp_port),
-        .tcp_dst_port       (dst_tcp_port)
-    );
+        tcp_stack_top tcp_stack_inst (
+            //------------------- Clocks and resets ---------------//
+            .clk(clk_156mhz_int),
+            .rst(rst_156mhz_int),
+            //------------------- MAC interface -------------------//
+            .mac_rx_axis_tdata   (mac_fifo_rx_axis_tdata ),
+            .mac_rx_axis_tkeep   (mac_fifo_rx_axis_tkeep ),
+            .mac_rx_axis_tvalid  (mac_fifo_rx_axis_tvalid),
+            .mac_rx_axis_tready  (mac_fifo_rx_axis_tready),
+            .mac_rx_axis_tlast   (mac_fifo_rx_axis_tlast ),
+            .mac_rx_axis_tuser   (mac_fifo_rx_axis_tuser ),
+            
+            .mac_tx_axis_tdata   (mac_fifo_tx_axis_tdata ),
+            .mac_tx_axis_tkeep   (mac_fifo_tx_axis_tkeep ),
+            .mac_tx_axis_tvalid  (mac_fifo_tx_axis_tvalid),
+            .mac_tx_axis_tready  (mac_fifo_tx_axis_tready),
+            .mac_tx_axis_tlast   (mac_fifo_tx_axis_tlast ),
+            .mac_tx_axis_tuser   (mac_fifo_tx_axis_tuser ),
+            //------------------- TCP interface -------------------//
+            .app_tx_axis_tdata  (app_tx_axis_tdata ),
+            .app_tx_axis_tkeep  (app_tx_axis_tkeep ),
+            .app_tx_axis_tvalid (app_tx_axis_tvalid),
+            .app_tx_axis_tlast  (app_tx_axis_tlast ),
+            .app_tx_axis_tready (app_tx_axis_tready),
+            
+        	.app_rx_axis_tdata  (app_rx_axis_tdata ),
+            .app_rx_axis_tkeep  (app_rx_axis_tkeep ),
+            .app_rx_axis_tvalid (app_rx_axis_tvalid),
+            .app_rx_axis_tlast  (app_rx_axis_tlast ),
+            .app_rx_axis_tuser  (),
+            .app_rx_axis_tready (app_rx_axis_tready),
+            //------------------- Configuration -------------------//
+            .desc_axis_tvalid   (desc_axis_tvalid),
+            .desc_axis_tready   (desc_axis_tready),
+            .configuration_done (configuration_done),
+            .src_ip_addr        (local_ip_addr),
+            .gateway_ip_addr    (gateway_ip_addr),
+            .subnet_mask        (subnet_mask),
+            .tcp_linkup          (tcp_linkup),
+            .dst_ip_addr        (dst_ip_addr),
+            .src_mac_addr       (local_mac_addr),
+            .tcp_src_port       (local_tcp_port),
+            .tcp_dst_port       (dst_tcp_port)
+        );
     end 
     else if(UDP == 1)begin:udp_stack
         udp_stack_top udp_stack_inst (

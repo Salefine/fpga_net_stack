@@ -1,19 +1,25 @@
 # 🎣 10Gbps TCP & UDP  FPGA network stack
 
-## :rocket: UDP协议栈功能特点
+<img src="img/HDL-Verilog%2FSystemVerilog-orange.svg" alt="image-20261103100041783" align="left" />
+
+<img src="img/license-MIT-blue.svg" alt="image-20261103100041783" align="left" />
+
+<img src="img/Platform-Xilinx%2FAMD-9cf.svg" alt="image-20261103100041783" align="left" />
+
+## :pencil: UDP协议栈功能特点
 
 | 根据 OSI 分层模型实现符合 **IEEE802.3** 标准的 **ARP、IPV4、ICMP、UDP** 协议栈 |
 | ------------------------------------------------------------ |
 | 支持 ARP，用于获取或发送 MAC 地址                            |
 | 支持 ICMP，用于响应 Ping 命令                                |
-| ARP 报文应答支持所有来查询的应答，可以缓存 1 个 ARP 表       |
+| ARP 报文应答支持所有来查询的应答，可以缓存同一个子网下512 个 ARP 表 |
 | ARP 表未建立时，不会发送 UDP 数据包                          |
 | 10Gbps 以太网连接，支持 UDP/IP 校验和处理，CRC 由 MAC IP 计算产生 |
 | 用户接口为 **AXI4 stream** 接口，协议栈利用 MAC IP 产生的时钟 156.25MHz，10Gbps 数据总线宽度 64bit |
 
 
 
-## :rocket: UDP协议栈验证
+## :pencil: UDP协议栈验证
 
 ### :hammer: Build
 
@@ -67,15 +73,14 @@
 
 
 
-### :unicorn: UDP速率测试
+### :hammer: *UDP*速率测试
 
-1.配置好FPGA的mac地址以及ip地址。同时配置好目的ip。这里
+1.配置好FPGA的mac地址以及IP地址。同时配置好目的IP。这里
 
-<img src="img/image-20261103100041783.png" alt="image-20261103100041783" style="zoom:67%;" />
+| <img src="img/image-20261103100041783.png" alt="image-20261103100041783" style="zoom:67%;" align=left /> | 1. 这里做好配置，本地端口以及目的端口，本地mac地址<br>2.同时配置好本地IP地址以及目的IP地址，要求IP地址必须处于同一个网段下<br>3.<span style="color:green">st_start</span>: 开始数据传输<br>4.<span style="color:green">st_length</span>: 每包的长度，这里最大不能超过4096字节<br>5.<span style="color:green">configure</span>: 配置信号，设置为button格式，主动发出ARP请求<br>6.<span style="color:green">configuration_done</span>: 配置完成信号，代表已成功获取对方的mac地址 |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
 
-
-
-同时在linux的主机端上配置好主机的ip
+同时在LINUX的主机端上配置好主机的IP
 
 ```cmd
 enp7s0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
@@ -87,7 +92,7 @@ enp7s0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
         TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
 ```
 
-首先是测试arping功能，验证arp的发送与响应
+首先是测试arping功能，验证ARP的发送与响应
 
 ```cmd
 ees@ees-zhi:~/NetAssistant/build$ sudo arping 192.168.2.35
@@ -123,18 +128,48 @@ rtt min/avg/max/mdev = 0.062/0.105/0.253/0.073 ms
 
 
 
-验证协议栈速率，这里让FPGA一直在发包，让FPGA一直向主机发送数据包，这里网卡的负载能力有限，所以数据包的长度超过4500字节时网卡会收不到数据包。
+验证协议栈速率，这里让FPGA一直在发包，让FPGA一直向主机发送数据包，这里网卡的负载能力有限，所以数据包的长度超过4096字节时网卡会收不到数据包。
 
-```cmd
-ees@ees-zhi: sudo ip link set enp7s0 mtu 9000
-ees@ees-zhi: sudo bmon -bp enp7s0
+```
+ees@ees-zhi:~$ sudo ip link set enp7s0 mtu 9000
+ees@ees-zhi:~$ sudo bmon -bp enp7s0
+ees@ees-zhi:~$ sudo apt install rdma-core ibverbs-utils perftest
+ees@ees-zhi:~$ ibv_devinfo
+hca_id:	mlx4_0
+	transport:			InfiniBand (0)
+	fw_ver:				2.9.1200
+	node_guid:			0002:c903:0053:ee10
+	sys_image_guid:			0002:c903:0053:ee10
+	vendor_id:			0x02c9
+	vendor_part_id:			26448
+	hw_ver:				0xB0
+	board_id:			MT_0F30120010
+	phys_port_cnt:			2
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
+		port:	2
+			state:			PORT_DOWN (1)
+			max_mtu:		4096 (5)
+			active_mtu:		1024 (3)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x00
+			link_layer:		Ethernet
+
 ```
 
 ![image-20261103101359611](img/image-20261103101359611.png)
 
 
 
-## :rocket: TCP协议栈
+## *:pencil: TCP*协议栈
 
 | 根据 OSI 分层模型实现符合 **IEEE802.3** 标准的 **ARP、IPV4、ICMP、TCP** 协议栈 |
 | ------------------------------------------------------------ |
@@ -235,5 +270,7 @@ fabric 逻辑新的临界路径在 ARP 模块（2.239ns），若后续还想再�
 
 
 
-
+| TCP滑动窗口功能暂未实现，必须等待ack信号后才继续发出下一拍数据，导致TCP协议栈速率较低 |
+| ------------------------------------------------------------ |
+| **未添加RoCEv2，增加RDMA功能**                               |
 

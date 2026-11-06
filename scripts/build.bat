@@ -465,6 +465,7 @@ add_files -fileset sim_1 -norecurse [list \
     [file join $tb_dir tb_eth_axis_tx.sv] \
     [file join $tb_dir tb_arp_v1.sv] \
     [file join $tb_dir tb_axis_arb_mux.sv] \
+    [file join $tb_dir tb_axis_arbiter.sv] \
     [file join $tb_dir tb_eth_axis_rx.sv]]
 update_compile_order -fileset sim_1
 set_property top tb_udp_stack_top [get_filesets sim_1]
