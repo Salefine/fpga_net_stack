@@ -31,7 +31,7 @@
    cd fpga_net_stack
    ```
 
-2. Windows 环境使用 `scripts\build.bat` 集成入口：运行后列出所有开发板（如 `Alveo_U200`、`xcvu5p`），选择后直接在对应的 `example\<开发板>\fpga` 目录下创建/打开 Vivado 工程。工程创建脚本已集成在 `scripts\build.bat` 内（网络协议栈 RTL 列表共享，开发板器件型号在脚本内 `:board_cfg` 板卡表中配置；尚未实现的开发板会在菜单中标注 `[not implemented yet]`）。Vivado 安装路径通过环境变量 `VIVADO_2024_2` 指定，或修改脚本内的默认路径。
+2. Windows 环境使用 `scripts\build.bat` 集成入口：运行后列出所有开发板（`Alveo_U200`、`vcu108`、`vcu118`、`xcvu5p`、`zcu106`），选择后直接在对应的 `example\<开发板>\fpga` 目录下创建/打开 Vivado 工程。工程创建脚本已集成在 `scripts\build.bat` 内（网络协议栈 RTL 列表共享，开发板的器件型号与收发器预设 `GTY-10GBASE-R`/`GTH-10GBASE-R` 在脚本内 `:board_cfg` 板卡表中配置；尚未实现的开发板会在菜单中标注 `[not implemented yet]`）。Vivado 安装路径通过环境变量 `VIVADO_2024_2` 指定，或修改脚本内的默认路径。
 
    ```cmd
    cd scripts

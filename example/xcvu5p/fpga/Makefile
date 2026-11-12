@@ -140,7 +140,7 @@ update_compile_order -fileset sources_1
 # GT Wizard Full
 # ------------------------------------------------------------
 
-create_ip -name gtwizard_ultrascale -vendor xilinx.com -library ip -version 1.7 -module_name eth_xcvr_gt_full
+create_ip -name gtwizard_ultrascale -vendor xilinx.com -library ip -module_name eth_xcvr_gt_full
 
 set_property CONFIG.preset {GTY-10GBASE-R} [get_ips eth_xcvr_gt_full]
 
@@ -150,6 +150,8 @@ set_property -dict [list \
     CONFIG.LOCATE_TX_USER_CLOCKING {CORE} \
     CONFIG.RX_USER_DATA_WIDTH {64} \
     CONFIG.TX_USER_DATA_WIDTH {64} \
+    CONFIG.RX_INT_DATA_WIDTH {64} \
+    CONFIG.TX_INT_DATA_WIDTH {64} \
     CONFIG.ENABLE_OPTIONAL_PORTS {qpll0lock_out} \
 ] [get_ips eth_xcvr_gt_full]
 
@@ -161,7 +163,7 @@ update_compile_order -fileset sources_1
 # GT Wizard Channel
 # ------------------------------------------------------------
 
-create_ip -name gtwizard_ultrascale -vendor xilinx.com -library ip -version 1.7 -module_name eth_xcvr_gt_channel
+create_ip -name gtwizard_ultrascale -vendor xilinx.com -library ip -module_name eth_xcvr_gt_channel
 
 set_property CONFIG.preset {GTY-10GBASE-R} [get_ips eth_xcvr_gt_channel]
 
@@ -172,17 +174,18 @@ set_property -dict [list \
     CONFIG.LOCATE_TX_USER_CLOCKING {CORE} \
     CONFIG.RX_USER_DATA_WIDTH {64} \
     CONFIG.TX_USER_DATA_WIDTH {64} \
+    CONFIG.RX_INT_DATA_WIDTH {64} \
+    CONFIG.TX_INT_DATA_WIDTH {64} \
 ] [get_ips eth_xcvr_gt_channel]
 
 generate_target all [get_files eth_xcvr_gt_channel.xci]
 set_property GENERATE_SYNTH_CHECKPOINT 0 [get_files eth_xcvr_gt_channel.xci]
 update_compile_order -fileset sources_1
-
 # ------------------------------------------------------------
 # VIO IP
 # ------------------------------------------------------------
 
-create_ip -name vio -vendor xilinx.com -library ip -version 3.0 -module_name vio_ip_cfg
+create_ip -name vio -vendor xilinx.com -library ip -module_name vio_ip_cfg
 
 set_property -dict [list \
     CONFIG.C_NUM_PROBE_IN {2} \
@@ -207,24 +210,6 @@ set_property -dict [list \
 
 generate_target all [get_files vio_ip_cfg.xci]
 set_property GENERATE_SYNTH_CHECKPOINT 0 [get_files vio_ip_cfg.xci]
-update_compile_order -fileset sources_1
-
-
-# ------------------------------------------------------------
-# AXIS Data FIFO
-# ------------------------------------------------------------
-
-create_ip -name axis_data_fifo -vendor xilinx.com -library ip -version 2.0 -module_name tcp_echo_fifo
-
-set_property -dict [list \
-    CONFIG.FIFO_DEPTH {1024} \
-    CONFIG.FIFO_MODE {2} \
-    CONFIG.HAS_TKEEP {1} \
-    CONFIG.TDATA_NUM_BYTES {8} \
-] [get_ips tcp_echo_fifo]
-
-generate_target all [get_files tcp_echo_fifo.xci]
-set_property GENERATE_SYNTH_CHECKPOINT 0 [get_files tcp_echo_fifo.xci]
 update_compile_order -fileset sources_1
 
 

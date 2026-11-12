@@ -15,7 +15,8 @@ rem  Adding a new board:
 rem    1. create example\BOARD\fpga and example\BOARD\rtl
 rem    2. add board sources (rtl\*.v / *.sv, top module "fpga")
 rem       and constraints (example\BOARD\*.xdc, *.tcl)
-rem    3. add the board's part number to :board_cfg below
+rem    3. add the board's part number (and transceiver preset, if the
+rem       part has no GTY transceivers) to :board_cfg below
 rem
 rem  Usage:
 rem    build.bat                    board menu, then open project (GUI)
@@ -37,9 +38,9 @@ rem ============================================================
 for %%R in ("%~dp0..") do set "REPO_ROOT=%%~fR"
 
 rem ---- Vivado installation ------------------------------------
-set "VIVADO_HOME=%VIVADO_2024_2%"
-if not defined VIVADO_HOME set "VIVADO_HOME=D:\tools\xilinx2024.2\Vivado\2024.2"
-if not exist "%VIVADO_HOME%\bin\vivado.bat" set "VIVADO_HOME=C:\Xilinx\Vivado\2024.2"
+set "VIVADO_HOME=%VIVADO_2026_1%"
+if not defined VIVADO_HOME set "VIVADO_HOME=D:\tools\xilinx2026.1\2026.1\Vivado"
+if not exist "%VIVADO_HOME%\bin\vivado.bat" set "VIVADO_HOME=C:\Xilinx\Vivado\2026.1"
 set "VIVADO=%VIVADO_HOME%\bin\vivado.bat"
 
 rem ---- discover boards (any example\NAME\fpga directory) ------
@@ -145,9 +146,9 @@ if "%SKIP%"=="0" (
 )
 more +%SKIP% "%~f0" > "%TCL_FILE%"
 if defined GT_QUAD (
-    call "%VIVADO%" -mode batch -source "%TCL_FILE%" -tclargs "%PROJ_DIR%" "%PART%" "%GT_QUAD%"
+    call "%VIVADO%" -mode batch -source "%TCL_FILE%" -tclargs "%PROJ_DIR%" "%PART%" "%GT_PRESET%" "%GT_QUAD%"
 ) else (
-    call "%VIVADO%" -mode batch -source "%TCL_FILE%" -tclargs "%PROJ_DIR%" "%PART%"
+    call "%VIVADO%" -mode batch -source "%TCL_FILE%" -tclargs "%PROJ_DIR%" "%PART%" "%GT_PRESET%"
 )
 set "EXIT_CODE=%ERRORLEVEL%"
 del /f /q "%TCL_FILE%" >nul 2>&1
@@ -208,17 +209,34 @@ exit /b 0
 
 rem ---- per-board configuration ----------------------------------
 :board_cfg
-rem Sets PART (Vivado part number, required) and GT_QUAD (the
-rem xxv_ethernet CONFIG.GT_GROUP_SELECT value; empty = IP default).
+rem Sets PART (Vivado part number, required), GT_PRESET (gtwizard
+rem 10GBASE-R preset, must match the transceiver type of the part) and
+rem GT_QUAD (xxv_ethernet CONFIG.GT_GROUP_SELECT, empty = IP default).
+rem Keep the names here identical to the example\BOARD folder names.
 set "PART="
+set "GT_PRESET=GTY-10GBASE-R"
 set "GT_QUAD="
 if /i "%~1"=="xcvu5p" (
     set "PART=xcvu5p-flvb2104-2-i"
     set "GT_QUAD=Quad_X1Y5"
 )
-rem Alveo U200: set GT_QUAD to the quad wired to your QSFP/SFP cage
+rem Alveo U200 (Virtex UltraScale+ VU9P): set GT_QUAD to the quad
+rem wired to your QSFP/SFP cage
 if /i "%~1"=="Alveo_U200" (
     set "PART=xcu200-fsgd2104-2-e"
+)
+rem VCU108 (Virtex UltraScale VU095)
+if /i "%~1"=="vcu108" (
+    set "PART=xcvu095-ffva2104-2-e"
+)
+rem VCU118 (Virtex UltraScale+ VU9P)
+if /i "%~1"=="vcu118" (
+    set "PART=xcvu9p-flga2104-2L-e"
+)
+rem ZCU106 (Zynq UltraScale+ MPSoC ZU7EV) has GTH transceivers only
+if /i "%~1"=="zcu106" (
+    set "PART=xczu7ev-ffvc1156-2-e"
+    set "GT_PRESET=GTH-10GBASE-R"
 )
 goto :eof
 
@@ -281,17 +299,20 @@ exit /b 0
 
 #__TCL__
 # Parameterized project restore script for example/BOARD/fpga, based on
-# the recorded xcvu5p GUI session. The board part number (and optionally
-# the xxv_ethernet GT quad) come from the command line.
+# the recorded xcvu5p GUI session. The board part number, the transceiver
+# wizard preset (GTY-10GBASE-R / GTH-10GBASE-R) and optionally the
+# xxv_ethernet GT quad come from the command line.
 
 if {$argc < 2} {
-    error "Usage: vivado -mode batch -source <script> -tclargs <project-dir> <part> [gt-quad]"
+    error "Usage: vivado -mode batch -source <script> -tclargs <project-dir> <part> \[gt-preset\] \[gt-quad\]"
 }
 
 set project_dir [file normalize [lindex $argv 0]]
 set part        [lindex $argv 1]
+set gt_preset   "GTY-10GBASE-R"
+if {$argc >= 3} { set gt_preset [lindex $argv 2] }
 set gt_quad     ""
-if {$argc >= 3} { set gt_quad [lindex $argv 2] }
+if {$argc >= 4} { set gt_quad [lindex $argv 3] }
 set repo_root   [file normalize [file join $project_dir .. .. ..]]
 
 # Deterministic rebuild: drop any previous project artifacts
@@ -361,7 +382,7 @@ foreach f {
 add_files -norecurse $rtl_files
 update_compile_order -fileset sources_1
 
-# ---- Board-level RTL (example/xcvu5p/rtl/) ----------------------------------
+# ---- Board-level RTL (example/BOARD/rtl/) -----------------------------------
 set board_dir [file normalize [file join $project_dir .. rtl]]
 set board_files [glob -nocomplain -directory $board_dir *.v *.sv]
 if {[llength $board_files] > 0} {
@@ -372,10 +393,11 @@ set_property top fpga [current_fileset]
 update_compile_order -fileset sources_1
 
 # ---- GT transceiver wizard: full (channel 0 + common) -----------------------
-# GTY preset, per the recorded GUI session; qpll0lock_out is additionally
-# enabled because eth_xcvr_phy_wrapper connects it.
+# Preset comes from the board table (GTY-10GBASE-R for UltraScale+ GTY parts,
+# GTH-10GBASE-R for GTH-only parts such as ZU7EV); qpll0lock_out is
+# additionally enabled because eth_xcvr_phy_wrapper connects it.
 create_ip -name gtwizard_ultrascale -vendor xilinx.com -library ip -module_name eth_xcvr_gt_full
-set_property CONFIG.preset {GTY-10GBASE-R} [get_ips eth_xcvr_gt_full]
+set_property CONFIG.preset $gt_preset [get_ips eth_xcvr_gt_full]
 set_property -dict [list \
     CONFIG.FREERUN_FREQUENCY {125} \
     CONFIG.LOCATE_RX_USER_CLOCKING {CORE} \
@@ -391,7 +413,7 @@ update_compile_order -fileset sources_1
 
 # ---- GT transceiver wizard: channel only ------------------------------------
 create_ip -name gtwizard_ultrascale -vendor xilinx.com -library ip -module_name eth_xcvr_gt_channel
-set_property CONFIG.preset {GTY-10GBASE-R} [get_ips eth_xcvr_gt_channel]
+set_property CONFIG.preset $gt_preset [get_ips eth_xcvr_gt_channel]
 set_property -dict [list \
     CONFIG.FREERUN_FREQUENCY {125} \
     CONFIG.LOCATE_COMMON {EXAMPLE_DESIGN} \
@@ -430,19 +452,7 @@ generate_target all [get_files vio_ip_cfg.xci]
 set_property GENERATE_SYNTH_CHECKPOINT 0 [get_files vio_ip_cfg.xci]
 update_compile_order -fileset sources_1
 
-create_ip -name axis_data_fifo -vendor xilinx.com -library ip -module_name axis_data_fifo_0
-set_property -dict [list \
-  CONFIG.FIFO_DEPTH {1024} \
-  CONFIG.FIFO_MODE {2} \
-  CONFIG.HAS_TKEEP {1} \
-  CONFIG.TDATA_NUM_BYTES {8} \
-] [get_ips axis_data_fifo_0]
-generate_target all [get_files axis_data_fifo_0.xci]
-set_property GENERATE_SYNTH_CHECKPOINT 0 [get_files axis_data_fifo_0.xci]
-update_compile_order -fileset sources_1
-
-
-# ---- Constraint fileset (example/xcvu5p/) -----------------------------------
+# ---- Constraint fileset (example/BOARD/) ------------------------------------
 # fpga.xdc is the top-level XDC; the three timing-constraint scripts apply
 # CDC constraints to sync_reset / axis_async_fifo / eth_mac_*_fifo instances
 # (same fileset contents as the original recorded project).
