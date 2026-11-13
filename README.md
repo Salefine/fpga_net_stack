@@ -1,4 +1,4 @@
-# 🎣 10Gbps TCP & UDP  FPGA network stack
+# 10Gbps TCP & UDP  FPGA network stack
 
 <img src="img/HDL-Verilog%2FSystemVerilog-orange.svg" alt="image-20261103100041783" align="left" />
 
@@ -6,7 +6,7 @@
 
 <img src="img/Platform-Xilinx%2FAMD-9cf.svg" alt="image-20261103100041783" align="left" />
 
-## :pencil: UDP协议栈功能特点
+## UDP协议栈功能特点
 
 | 根据 OSI 分层模型实现符合 **IEEE802.3** 标准的 **ARP、IPV4、ICMP、UDP** 协议栈 |
 | ------------------------------------------------------------ |
@@ -19,9 +19,9 @@
 
 
 
-## :pencil: UDP协议栈验证
+## UDP协议栈验证
 
-### :hammer: Build
+### Build
 
 1. 从github处下载对应的仓库代码
 
@@ -61,6 +61,17 @@
    make clean   # 清除生成的文件
    ```
 
+4. 40G 以太网 MAC 单元仿真（`tb/tb_eth_mac_40g.sv`）：针对 `l_ethernet` 40GBASE-R（256-bit AXI4-Stream、GT 外置、统计计数器）的自检测试平台，覆盖最小帧、尺寸扫描（61/100/512/1518/4096 B）、背靠背突发、错误帧（`tx_axis_tuser`）、帧内 AXI4-Stream 停顿以及统计计数器校验。
+
+   ```bash
+   # 独立运行：自动创建工程、生成 eth_xcvr_40_full IP 并仿真
+   vivado -mode batch -source tb/eth_mac_40g_sim.tcl
+   ```
+
+   也可在已有工程中把 `tb/tb_eth_mac_40g.sv` 加入 `sim_1` 文件集，仿真顶层设为 `tb_eth_mac_40g`。
+
+   PCS 侧使用"TX PCS 输出直连 RX PCS 输入"的串行环回模型。该核的 RX PCS 依赖 GT 的 64B/66B gearbox 才能完成 lane 同步，因此环回模式下 RX 通道检查会自动跳过（日志给出 WARNING，TX 通路与统计计数器仍完整校验）。RX 通路需在带 GT 的环境（IP 自带 example design 或实际板卡）中验证。
+
    代码中关于协议栈的选择，选择UDP/TCP就将其置1。
 
    ```verilog
@@ -73,7 +84,7 @@
 
 
 
-### :hammer: *UDP*速率测试
+### *UDP*速率测试
 
 1.配置好FPGA的mac地址以及IP地址。同时配置好目的IP。这里
 
@@ -169,7 +180,7 @@ hca_id:	mlx4_0
 
 
 
-## *:pencil: TCP*协议栈
+## *TCP*协议栈
 
 | 根据 OSI 分层模型实现符合 **IEEE802.3** 标准的 **ARP、IPV4、ICMP、TCP** 协议栈 |
 | ------------------------------------------------------------ |
@@ -188,7 +199,7 @@ hca_id:	mlx4_0
 
 
 
-###  :factory: 分层与数据通路
+###  分层与数据通路
 
 TCP 协议栈采用流式分层结构：`tcp_stack_top.v` 负责网络配置、ARP 解析以及 Ethernet/IPv4 协议分流；`tcp_layer.v` 将 TCP 连接控制、接收和发送模块组合起来。数据通路以 64-bit AXI-Stream 传递，使用 `tkeep` 标识有效字节、`tlast` 标识报文边界，并通过 `tvalid/tready` 实现背压。
 
@@ -200,7 +211,7 @@ TCP 协议栈采用流式分层结构：`tcp_stack_top.v` 负责网络配置、A
 
 
 
-###  :fireworks:TCP协议栈验证
+###  TCP协议栈验证
 
 1.验证三次握手与四次挥手
 
@@ -225,7 +236,7 @@ TCP 协议栈采用流式分层结构：`tcp_stack_top.v` 负责网络配置、A
 ees@ees-zhi: sudo tcpdump -i enp7s0 -nn -s 0 -w test.pcap
 ```
 
-###  :fireworks: TCP协议栈发包
+###  TCP协议栈发包
 
  构建一个echo的回环，从client发送数据到server接收数据并且将数据转发给client，查看tcp的发送计数以及接收计数是否一致。
 
@@ -241,7 +252,7 @@ https://github.com/alexforencich/verilog-ethernet
 
 
 
-## :end: 时序性能
+## 时序性能
 
 ### :alien: 优化结果
 
