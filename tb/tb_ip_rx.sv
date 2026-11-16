@@ -12,6 +12,8 @@
 //     -> payload is accepted with ip_rx_axis_tuser == 0 only when the sum
 //        folds to 0xffff AND frame_rx_axis_tuser == 0
 //   * 20-byte header removal + 64-bit re-alignment of the payload
+//   * ethernet padding behind the IP payload (short frames are padded to
+//     the 64-byte minimum) is cut off at total_length - IHL*4
 //   * tkeep / tlast for the two tail alignments:
 //        - tail ends in the low 4 bytes of the last beat (no flush beat)
 //        - tail extends into the high 4 bytes (one extra flush beat)
@@ -277,15 +279,23 @@ endfunction
 // reference packet builder.
 task check_data_consistency;
     integer b, j, byte_idx, plen, nbeats, rem;
+    integer tlen, ihl;
     reg [63:0] ed;
     reg [7:0]  ek;
     begin
+        // the payload length is decoded from the captured header, so the
+        // reference payload stops where the ethernet padding starts
         ref_len  = 0;
         byte_idx = 0;
+        tlen     = 0;
+        ihl      = 0;
         for (b = 0; b < in_nb; b = b + 1) begin
             for (j = 0; j < 8; j = j + 1) begin
                 if (in_keep[b][j]) begin
-                    if (byte_idx >= 20) begin
+                    if (byte_idx == 0) ihl  = in_data[b][j*8 +: 8] & 8'h0f;
+                    if (byte_idx == 2) tlen = in_data[b][j*8 +: 8] << 8;
+                    if (byte_idx == 3) tlen = tlen | in_data[b][j*8 +: 8];
+                    if (byte_idx >= 20 && ref_len < (tlen - ihl*4)) begin
                         ref_byte[ref_len] = in_data[b][j*8 +: 8];
                         ref_len = ref_len + 1;
                     end
@@ -364,6 +374,16 @@ task fill_payload(input integer plen, input integer base);
     begin
         for (j = 0; j < plen; j = j + 1)
             pkt[20 + j] = base + j;
+    end
+endtask
+
+// zero filler behind a short IP packet, emulating the MAC's padding up to the
+// 60-byte ethernet frame minimum (14-byte header already stripped here)
+task fill_pad(input integer from, input integer to);
+    integer j;
+    begin
+        for (j = from; j < to; j = j + 1)
+            pkt[j] = 8'h00;
     end
 endtask
 
@@ -489,6 +509,62 @@ initial begin
     repeat (4) @(posedge clk);
 
     // ------------------------------------------------------------------
+    // Ethernet padding removal: a short IP packet is padded by the MAC to
+    // the 64-byte frame minimum (46 bytes once the 14-byte header is
+    // stripped).  Only total_length - IHL*4 bytes may reach the output.
+    // ------------------------------------------------------------------
+
+    // TEST 5 : padding tail lands on 8-byte boundaries
+    $display("TEST5: payload=8 inside a 46-byte padded frame, 18 pad bytes");
+    build_ip_header(32'hC0A8010A, 32'hC0A80114, 8'h11, 8);
+    fill_payload(8, 32'h10);
+    fill_pad(total_len, 46);
+    fork
+        send_frame(46, 1'b0);
+        capture_output;
+    join
+    check_output(1'b0);
+    repeat (4) @(posedge clk);
+
+    // TEST 5b : payload stops in the middle of an output beat, the remaining
+    //           lanes and the following beats are padding
+    $display("TEST5b: payload=5 inside a 46-byte padded frame, 21 pad bytes");
+    build_ip_header(32'hC0A8010A, 32'hC0A80114, 8'h11, 5);
+    fill_payload(5, 32'h30);
+    fill_pad(total_len, 46);
+    fork
+        send_frame(46, 1'b0);
+        capture_output;
+    join
+    check_output(1'b0);
+    repeat (4) @(posedge clk);
+
+    // TEST 5c : the frame error flag arrives with the last padding beat, so it
+    //           still has to be reported on the terminating payload beat
+    $display("TEST5c: payload=8 inside a padded frame, error on the pad tail");
+    build_ip_header(32'hC0A8010A, 32'hC0A80114, 8'h11, 8);
+    fill_payload(8, 32'h10);
+    fill_pad(total_len, 46);
+    fork
+        send_frame(46, 1'b1);
+        capture_output;
+    join
+    check_output(1'b1);
+    repeat (4) @(posedge clk);
+
+    // TEST 5d : padding on a larger packet (20-byte payload + 6 pad bytes)
+    $display("TEST5d: payload=20 inside a 46-byte padded frame, 6 pad bytes");
+    build_ip_header(32'hC0A8010A, 32'hC0A80114, 8'h11, 20);
+    fill_payload(20, 32'hA0);
+    fill_pad(total_len, 46);
+    fork
+        send_frame(46, 1'b0);
+        capture_output;
+    join
+    check_output(1'b0);
+    repeat (4) @(posedge clk);
+
+    // ------------------------------------------------------------------
     // Backpressure stress: a 6000-byte payload (750 beats) exceeds the
     // 512-beat output FIFO, so with a throttled downstream the DUT must
     // deassert frame_rx_axis_tready and still deliver byte-perfect data.
@@ -507,6 +583,31 @@ initial begin
     repeat (4) @(posedge clk);
     if (saw_tready_low)
         $display("  backpressure propagated: frame_rx_axis_tready deasserted");
+    else begin
+        $display("  NOTE: frame_rx_axis_tready never deasserted");
+        error_count = error_count + 1;
+    end
+
+    // ------------------------------------------------------------------
+    // Same payload, but with a padding tail and a throttled downstream: the
+    // trim path has to hold the final payload beat until the frame is drained
+    // while the output FIFO is full.
+    // ------------------------------------------------------------------
+    $display("BACKPRESSURE+TRIM: payload=6000 + 10 pad bytes, throttled 1/10");
+    saw_tready_low  = 1'b0;
+    tready_throttle = 1'b1;
+    build_ip_header(32'hC0A8010A, 32'hC0A80114, 8'h11, 6000);
+    fill_payload(6000, 32'h00);
+    fill_pad(total_len, total_len + 10);
+    fork
+        send_frame(total_len + 10, 1'b0);
+        capture_output;
+    join
+    check_output(1'b0);
+    tready_throttle = 1'b0;
+    repeat (4) @(posedge clk);
+    if (saw_tready_low)
+        $display("  backpressure propagated while trimming padding");
     else begin
         $display("  NOTE: frame_rx_axis_tready never deasserted");
         error_count = error_count + 1;

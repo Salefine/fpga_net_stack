@@ -1,4 +1,4 @@
-# <span style="color:green">Transmission Control Protocol</span>
+# <span style="color:gray">Transmission Control Protocol</span>
 
 TCP 属于传输层，位于 IP 层之上、应用层之下。
 
@@ -247,3 +247,7 @@ Keepalive ACK
 > ACK=5001，表示 PC 当前仍然期望 FPGA 从序列号 5001 开始发送数据。
 
 <img src="img/image-20261113172602179.png" alt="image-20261113172602179" style="zoom:50%;" align=left />
+
+
+
+## 5.窗口机制

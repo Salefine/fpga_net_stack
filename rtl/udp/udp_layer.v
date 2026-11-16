@@ -26,8 +26,10 @@
  *   udp_rx: verifies the UDP checksum (pseudo-header from recv_*_ip_addr),
  *           filters datagrams by destination port (local_udp_port =
  *           udp_src_port) and source port (dst_udp_port = udp_dst_port),
- *           strips padding down to the UDP length and hands the payload
- *           to the application
+ *           strips the 8-byte UDP header and hands the payload to the
+ *           application.  The ethernet padding of a short frame has already
+ *           been removed by ip_rx, so the datagram arrives exactly as long
+ *           as its UDP length field describes.
  *   udp_tx: frames the application payload into UDP datagrams (ports,
  *           length, checksum) once configure_done is asserted
  *

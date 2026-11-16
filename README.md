@@ -203,7 +203,7 @@ hca_id:	mlx4_0
 
 TCP 协议栈采用流式分层结构：`tcp_stack_top.v` 负责网络配置、ARP 解析以及 Ethernet/IPv4 协议分流；`tcp_layer.v` 将 TCP 连接控制、接收和发送模块组合起来。数据通路以 64-bit AXI-Stream 传递，使用 `tkeep` 标识有效字节、`tlast` 标识报文边界，并通过 `tvalid/tready` 实现背压。
 
-- **接收方向**：`eth_axis_rx_v1` 去除 Ethernet 头并按 EtherType 分流；`ip_rx` 解析并去除 IPv4 头，再按 IP Protocol 将 TCP（`6`）和 ICMP（`1`）分开。TCP 数据由 `tcp_rx` 解析、校验、对齐后送往应用侧。
+- **接收方向**：`eth_axis_rx_v1` 去除 Ethernet 头并按 EtherType 分流；`ip_rx` 解析并去除 IPv4 头，按 `total_length` 裁掉 MAC 为凑满 64 字节最小帧而在尾部补的 padding，再按 IP Protocol 将 TCP（`6`）和 ICMP（`1`）分开。TCP 数据由 `tcp_rx` 解析、校验、对齐后送往应用侧。
 - **TCP 控制**：`tcp_rx` 将 SYN、ACK、FIN 和数据段相关事件及序号信息交给 `tcp_ctrl`。`tcp_ctrl` 维护连接状态、服务器序号和确认号，并生成 SYN+ACK、ACK、FIN+ACK 等控制段。
 - **发送方向**：`tcp_tx` 接收应用 AXI-Stream 数据，缓存负载并计算 TCP 校验和；`tcp_layer` 在控制段和数据段之间进行帧级仲裁，控制段优先，选定的来源保持到当前帧 `tlast` 握手，避免不同报文拼接。
 - **网络封装**：TCP/ICMP 流经 IP 协议流仲裁后进入 `ip_tx`；IPv4 帧再与 ARP 报文仲裁，最后由 `eth_axis_tx_v1` 添加 Ethernet 头并输出到 MAC。Ethernet FCS/CRC 由外部 MAC IP 处理。

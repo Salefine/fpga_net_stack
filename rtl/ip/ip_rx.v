@@ -3,8 +3,8 @@
  * @brief   IPv4 receive: header parse/check, 32-bit stream realignment,
  *          AXI-Stream valid/ready backpressure
  * @author  zzhi (zzhi4832@gmail.com)
- * @version 1.2
- * @date    2025-01-22
+ * @version 1.5
+ * @date    2026-11-16
  * 
  * @par :
  * ___________________________________________________________________________
@@ -36,6 +36,11 @@
  * |               |             |                  | (255.255.255.255) 的  |
  * |               |             |                  | 包整帧丢弃, 不进入    |
  * |               |             |                  | 输出FIFO              |
+ * |---------------|-------------|------------------|------------------------|
+ * |               |   v1.5      |                  | 去以太网padding: 按   |
+ * |               |             |                  | total_length-IHL*4    |
+ * |               |             |                  | 裁剪输出, 尾部补0字节 |
+ * |               |             |                  | 不再进入输出FIFO      |
  * 
  * @copyright Copyright (c) 2026 zzhi
  * ***************************************************************************/
@@ -67,19 +72,20 @@ module ip_rx(
     output  wire[31:0]  recv_dst_ip_addr    ,
     output  wire[31:0]  recv_src_ip_addr    , 
     output  wire[15:0]  ip_type             ,
-    output  wire[15:0]  ip_payload_len      // = IP total_length - IHL*4, 供传输层裁剪以太网padding
+    output  wire[15:0]  ip_payload_len      // = IP total_length - IHL*4 (payload on ip_rx_axis is cut to it)
 );
 
 //-----------------------------------------------------------------
-localparam  RECV_IP_HEADER0 =   7'b0000001;
-localparam  RECV_IP_HEADER1 =   7'b0000010;
-localparam  RECV_IP_HEADER2 =   7'b0000100;
-localparam  RECV_IP_PAYLOAD =   7'b0001000;
-localparam  RECV_IP_GOOD    =   7'b0010000;
-localparam  RECV_IP_FAIL    =   7'b0100000;
-localparam  RECV_IP_DROP    =   7'b1000000;   // dst IP not ours: drain frame
+localparam  RECV_IP_HEADER0 =   8'b00000001;
+localparam  RECV_IP_HEADER1 =   8'b00000010;
+localparam  RECV_IP_HEADER2 =   8'b00000100;
+localparam  RECV_IP_PAYLOAD =   8'b00001000;
+localparam  RECV_IP_GOOD    =   8'b00010000;
+localparam  RECV_IP_FAIL    =   8'b00100000;
+localparam  RECV_IP_DROP    =   8'b01000000;   // dst IP not ours: drain frame
+localparam  RECV_IP_TRIM    =   8'b10000000;   // payload done: drain ethernet padding
 
-reg [6:0] recv_ip_next, recv_ip_reg;
+reg [7:0] recv_ip_next, recv_ip_reg;
 reg [15:0] checksum_header0_next,checksum_header0_reg = 'b0;
 reg [15:0] checksum_header1_next,checksum_header1_reg = 'b0;
 reg [15:0] checksum_header2_next,checksum_header2_reg = 'b0;
@@ -93,6 +99,15 @@ reg [31:0] recv_src_ip_addr_next, recv_src_ip_addr_reg = 'b0;
 reg [31:0] recv_dst_ip_addr_next, recv_dst_ip_addr_reg = 'b0;
 reg [15:0] ip_type_next,          ip_type_reg          = 'b0;
 reg [15:0] ip_payload_len_next,   ip_payload_len_reg   = 'b0;
+
+// bytes of IP payload still to be forwarded for the current frame; the
+// ethernet padding behind them is dropped instead of being emitted
+reg [15:0] ip_payload_rem_next,   ip_payload_rem_reg   = 'b0;
+
+// final payload beat, held back while the padding tail is drained so that a
+// frame error reported on the frame's last beat still reaches the output
+reg [63:0] ip_rx_eop_tdata_next,  ip_rx_eop_tdata_reg  = 'b0;
+reg [7:0]  ip_rx_eop_tkeep_next,  ip_rx_eop_tkeep_reg  = 'b0;
 
 reg [63:0] ip_rx_axis_tdata_init;
 reg [7:0]  ip_rx_axis_tkeep_init;
@@ -154,6 +169,19 @@ function [63:0] tkeep_mask
   end
 endfunction
 
+// Byte lanes still belonging to the IP payload when rem payload bytes are
+// left in the frame; everything past them is ethernet padding.
+function [7:0] payload_keep
+  (
+  input [15:0] rem
+  );
+  begin
+      if (rem >= 16'd8)      payload_keep = 8'hff;
+      else if (rem == 16'd0) payload_keep = 8'h00;
+      else                   payload_keep = (8'h01 << rem[2:0]) - 8'h01;
+  end
+endfunction
+
 always @ * begin 
     recv_ip_next = recv_ip_reg;
     checksum_header0_next = checksum_header0_reg;
@@ -169,6 +197,10 @@ always @ * begin
     recv_dst_ip_addr_next = recv_dst_ip_addr_reg;
     ip_type_next          = ip_type_reg;
     ip_payload_len_next   = ip_payload_len_reg;
+
+    ip_payload_rem_next   = ip_payload_rem_reg;
+    ip_rx_eop_tdata_next  = ip_rx_eop_tdata_reg;
+    ip_rx_eop_tkeep_next  = ip_rx_eop_tkeep_reg;
 
     frame_rx_axis_tready = 1'b0;
 
@@ -196,6 +228,9 @@ always @ * begin
                     // total_length = {tdata[23:16], tdata[31:24]}, IHL = tdata[3:0]
                     // IP payload 长度 = total_length - IHL*4
                     ip_payload_len_next = {frame_rx_axis_tdata[23:16],frame_rx_axis_tdata[31:24]}
+                                        - {10'h0, frame_rx_axis_tdata[3:0], 2'b00};
+                    // 该帧后续只输出这么多字节, 其余为以太网padding
+                    ip_payload_rem_next = {frame_rx_axis_tdata[23:16],frame_rx_axis_tdata[31:24]}
                                         - {10'h0, frame_rx_axis_tdata[3:0], 2'b00};
                 end
             end
@@ -241,10 +276,13 @@ always @ * begin
                     // destination IP filter: the frame must be addressed to
                     // us (or the limited broadcast address); anything else is
                     // drained silently so it never reaches the transport layer
-                    if (recv_dst_ip_addr_next == local_ip_addr ||
-                        recv_dst_ip_addr_next == 32'hffffffff) begin 
+                    if ((recv_dst_ip_addr_next == local_ip_addr ||
+                         recv_dst_ip_addr_next == 32'hffffffff) &&
+                        ip_payload_len_next != 16'd0) begin 
                         recv_ip_next = RECV_IP_PAYLOAD;
                     end else begin 
+                        // foreign destination, or an IP packet without any
+                        // transport header to forward: drop the whole frame
                         recv_ip_next = RECV_IP_DROP;
                     end
                 end
@@ -269,32 +307,78 @@ always @ * begin
             frame_rx_axis_tready = ~out_fifo_full;
             if(frame_rx_axis_tvalid & frame_rx_axis_tready)begin 
                 // output one beat combining the previous beat's upper half
-                // and the current beat's lower half (4-byte realignment)
+                // and the current beat's lower half (4-byte realignment),
+                // then cut off every byte past the IP payload length so the
+                // ethernet padding of a short frame is never forwarded
+                ip_rx_axis_tkeep_init  = {frame_rx_axis_tkeep[3:0] , ip_rx_axis_tkeep_shift[7:4]}
+                                       & payload_keep(ip_payload_rem_reg);
                 ip_rx_axis_tdata_init  = tkeep_mask({frame_rx_axis_tdata[31:0] , ip_rx_axis_tdata_shift[63:32]},
-                                                    {frame_rx_axis_tkeep[3:0] , ip_rx_axis_tkeep_shift[7:4]});
-                ip_rx_axis_tkeep_init  = {frame_rx_axis_tkeep[3:0] , ip_rx_axis_tkeep_shift[7:4]};
+                                                    ip_rx_axis_tkeep_init);
                 ip_rx_axis_tvalid_init = 1'b1;
 
-                if(frame_rx_axis_tlast)begin 
-                    if(|frame_rx_axis_tkeep[7:4])begin 
-                        // payload tail continues into the upper 4 bytes of the
-                        // last input beat: one flush beat follows
-                        ip_rx_axis_tlast_init = 1'b0;
-                        ip_rx_axis_tuser_init = 1'b0;
-                        if(frame_rx_axis_tuser) recv_ip_next = RECV_IP_FAIL;
-                        else                     recv_ip_next = RECV_IP_GOOD;
-                    end
-                    else begin 
-                        // payload tail ends in the lower 4 bytes: final beat now
+                if(ip_payload_rem_reg <= 16'd8)begin 
+                    // the IP payload ends inside this beat
+                    ip_payload_rem_next = 16'd0;
+                    if(frame_rx_axis_tlast)begin 
+                        // ...and so does the frame: no padding to drop
                         ip_rx_axis_tlast_init = 1'b1;
                         ip_rx_axis_tuser_init = ((checksum_header7_next == 16'hffff) && ~frame_rx_axis_tuser) ? 1'b0 : 1'b1;
                         recv_ip_next = RECV_IP_HEADER0;
+                    end
+                    else begin 
+                        // padding beats follow and the frame error flag only
+                        // arrives with the frame's last beat, so hold this
+                        // final payload beat back until the padding is drained
+                        ip_rx_axis_tvalid_init = 1'b0;
+                        ip_rx_eop_tdata_next   = ip_rx_axis_tdata_init;
+                        ip_rx_eop_tkeep_next   = ip_rx_axis_tkeep_init;
+                        recv_ip_next = RECV_IP_TRIM;
                     end
                 end
                 else begin 
                     ip_rx_axis_tlast_init = 1'b0;
                     ip_rx_axis_tuser_init = 1'b0;
-                    recv_ip_next = RECV_IP_PAYLOAD;
+                    ip_payload_rem_next   = ip_payload_rem_reg - 16'd8;
+                    if(frame_rx_axis_tlast)begin 
+                        if(|frame_rx_axis_tkeep[7:4])begin 
+                            // payload tail continues into the upper 4 bytes of the
+                            // last input beat: one flush beat follows
+                            ip_rx_axis_tlast_init = 1'b0;
+                            ip_rx_axis_tuser_init = 1'b0;
+                            if(frame_rx_axis_tuser) recv_ip_next = RECV_IP_FAIL;
+                            else                     recv_ip_next = RECV_IP_GOOD;
+                        end
+                        else begin 
+                            // truncated frame: the payload ends with this beat
+                            ip_rx_axis_tlast_init = 1'b1;
+                            ip_rx_axis_tuser_init = ((checksum_header7_next == 16'hffff) && ~frame_rx_axis_tuser) ? 1'b0 : 1'b1;
+                            recv_ip_next = RECV_IP_HEADER0;
+                        end
+                    end
+                    else begin 
+                        ip_rx_axis_tlast_init = 1'b0;
+                        ip_rx_axis_tuser_init = 1'b0;
+                        recv_ip_next = RECV_IP_PAYLOAD;
+                    end
+                end
+            end
+        end
+
+        RECV_IP_TRIM : begin 
+            // the IP payload has been produced already: drain the ethernet
+            // padding and terminate the frame only once tlast shows up, so
+            // that a frame error on the padding tail still sets tuser
+            frame_rx_axis_tready = ~out_fifo_full;
+            if(frame_rx_axis_tvalid & frame_rx_axis_tready)begin 
+                if(frame_rx_axis_tlast)begin 
+                    ip_rx_axis_tdata_init  = ip_rx_eop_tdata_reg;
+                    ip_rx_axis_tkeep_init  = ip_rx_eop_tkeep_reg;
+                    ip_rx_axis_tvalid_init = 1'b1;
+                    ip_rx_axis_tlast_init  = 1'b1;
+                    ip_rx_axis_tuser_init  = ((checksum_header7_reg == 16'hffff) && ~frame_rx_axis_tuser) ? 1'b0 : 1'b1;
+                    recv_ip_next = RECV_IP_HEADER0;
+                end else begin 
+                    recv_ip_next = RECV_IP_TRIM;
                 end
             end
         end
@@ -303,9 +387,10 @@ always @ * begin
             frame_rx_axis_tready = 1'b0;
             if(~out_fifo_full)begin 
                 recv_ip_next = RECV_IP_HEADER0;
+                ip_rx_axis_tkeep_init  = {4'h0 , ip_rx_axis_tkeep_shift[7:4]}
+                                       & payload_keep(ip_payload_rem_reg);
                 ip_rx_axis_tdata_init  = tkeep_mask({32'h0 , ip_rx_axis_tdata_shift[63:32]},
-                                                    {4'h0 , ip_rx_axis_tkeep_shift[7:4]});
-                ip_rx_axis_tkeep_init  = {4'h0 , ip_rx_axis_tkeep_shift[7:4]};
+                                                    ip_rx_axis_tkeep_init);
                 ip_rx_axis_tvalid_init = 1'b1;
                 ip_rx_axis_tlast_init  = 1'b1;
                 ip_rx_axis_tuser_init  = (checksum_header7_reg == 16'hffff) ? 1'b0 : 1'b1;
@@ -316,9 +401,10 @@ always @ * begin
             frame_rx_axis_tready = 1'b0;
             if(~out_fifo_full)begin 
                 recv_ip_next = RECV_IP_HEADER0;
+                ip_rx_axis_tkeep_init  = {4'h0 , ip_rx_axis_tkeep_shift[7:4]}
+                                       & payload_keep(ip_payload_rem_reg);
                 ip_rx_axis_tdata_init  = tkeep_mask({32'h0 , ip_rx_axis_tdata_shift[63:32]},
-                                                    {4'h0 , ip_rx_axis_tkeep_shift[7:4]});
-                ip_rx_axis_tkeep_init  = {4'h0 , ip_rx_axis_tkeep_shift[7:4]};
+                                                    ip_rx_axis_tkeep_init);
                 ip_rx_axis_tvalid_init = 1'b1;
                 ip_rx_axis_tlast_init  = 1'b1;
                 ip_rx_axis_tuser_init  = 1'b1;
@@ -348,6 +434,9 @@ always @(posedge clk)begin
         recv_dst_ip_addr_reg <= 'b0;
         ip_type_reg          <= 'b0;
         ip_payload_len_reg   <= 'b0;
+        ip_payload_rem_reg   <= 'b0;
+        ip_rx_eop_tdata_reg  <= 'b0;
+        ip_rx_eop_tkeep_reg  <= 'b0;
 
         ip_rx_axis_tdata_shift  <= 64'd0;
         ip_rx_axis_tkeep_shift  <= 8'd0;
@@ -376,6 +465,9 @@ always @(posedge clk)begin
         recv_dst_ip_addr_reg <= recv_dst_ip_addr_next;
         ip_type_reg          <= ip_type_next;
         ip_payload_len_reg   <= ip_payload_len_next;
+        ip_payload_rem_reg   <= ip_payload_rem_next;
+        ip_rx_eop_tdata_reg  <= ip_rx_eop_tdata_next;
+        ip_rx_eop_tkeep_reg  <= ip_rx_eop_tkeep_next;
     end
 end
 

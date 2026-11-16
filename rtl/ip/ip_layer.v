@@ -24,7 +24,8 @@
  *
  *   ip_rx: parses/validates the IPv4 header (checksum, destination-IP
  *          filter), strips it, realigns the payload to the transport
- *          boundary and exports src/dst address + protocol metadata
+ *          boundary, drops the ethernet padding that follows the IP packet
+ *          and exports src/dst address + protocol metadata
  *   ip_tx: builds the IPv4 header (length, id, checksum) around the
  *          transport payload and streams the complete IP packet
  *

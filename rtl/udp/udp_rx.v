@@ -1,10 +1,10 @@
 /****************************************************************************
  * @file    udp_rx.v
- * @brief   UDP receive: header parse/checksum, store-and-forward payload,
+ * @brief   UDP receive: header parse/checksum, 8-byte UDP header strip,
  *          AXI-Stream valid/ready backpressure on both interfaces
  * @author  zzhi (zzhi4832@gmail.com)
- * @version 1.1
- * @date    2026-10-22
+ * @version 1.3
+ * @date    2026-11-16
  * 
  * @par :
  * ___________________________________________________________________________
@@ -15,6 +15,17 @@
  * |               |   v1.2      |                  | 目的端口过滤:          |
  * |               |             |                  | dst port != 本地端口   |
  * |               |             |                  | 的数据报整帧丢弃       |
+ * |---------------|-------------|------------------|------------------------|
+ * |               |   v1.3      |                  | 1. 以太网padding由ip_rx |
+ * |               |             |                  |    剔除, 本层不再裁剪, |
+ * |               |             |                  |    去掉长度FIFO与裁剪  |
+ * |               |             |                  |    状态机, 只保留4级   |
+ * |               |             |                  |    延迟线直达输出FIFO  |
+ * |               |             |                  | 2. 恢复输入反压        |
+ * |               |             |                  |    udp_rx_axis_tready  |
+ * |               |             |                  |    (按输出FIFO余量)    |
+ * |               |             |                  | 3. UDP校验和为0(未使用)|
+ * |               |             |                  |    视为校验通过        |
  * 
  * @copyright Copyright (c) 2026 zzhi
  * ***************************************************************************/
@@ -49,17 +60,6 @@ module udp_rx (
     input  wire          app_rx_axis_tready
 );
 
-function [3:0] count_valid_bytes;
-    input [7:0] keep;
-    integer i;
-    begin
-        count_valid_bytes = 4'd0;
-        for (i = 0; i < 8; i = i + 1) begin
-            count_valid_bytes = count_valid_bytes + keep[i];
-        end
-    end
-endfunction
-
 function    [15:0]  checksum_gen
   (
     input       [15:0]  dataina,
@@ -76,26 +76,6 @@ function    [15:0]  checksum_gen
 endfunction
 
 //----------------------------------------------------------------
-reg [15:0] udp_payload_length_reg      = 16'd0;
-reg [15:0] udp_payload_length_temp_reg = 16'd0;
-
-always @(posedge clk) begin
-    if (rst) begin
-        udp_payload_length_reg      <= 16'd0;
-        udp_payload_length_temp_reg <= 16'd0;
-    end
-    else if (udp_rx_axis_tvalid && udp_rx_axis_tready) begin
-        if (udp_rx_axis_tlast) begin
-            udp_payload_length_reg <= udp_payload_length_temp_reg + count_valid_bytes(udp_rx_axis_tkeep);
-            udp_payload_length_temp_reg <= 16'd0;
-        end
-        else begin
-            udp_payload_length_temp_reg <= udp_payload_length_temp_reg + count_valid_bytes(udp_rx_axis_tkeep);
-        end
-    end
-end
-
-//----------------------------------------------------------------
 localparam [3:0] RECV_DES = 4'b0001;
 localparam [3:0] RECV_DAT = 4'b0010;
 localparam [3:0] RECV_SUC = 4'b0100;
@@ -103,6 +83,32 @@ localparam [3:0] RECV_FAI = 4'b1000;
 localparam [3:0] RECV_DRP = 4'b0011;   // dst-port mismatch: drain the frame
 
 reg [3:0] recv_next,recv_reg;
+
+//----------------------------------------------------------------
+// Output FIFO status.  Declared up here because the input handshake below
+// has to know how much room is left.
+//----------------------------------------------------------------
+localparam  OUTPUT_FIFO_ADDR_WIDTH = 9;
+localparam  OUTPUT_FIFO_DEPTH      = 2**OUTPUT_FIFO_ADDR_WIDTH;
+// The 4-stage output delay line is clocked on every cycle (the position at
+// which the checksum error is injected into tuser depends on that fixed
+// latency), so the input is stopped a few entries before the FIFO is full:
+// a beat already inside the delay line can then always be retired.
+localparam  OUTPUT_FIFO_SLACK      = 8;
+
+reg [OUTPUT_FIFO_ADDR_WIDTH+1-1:0] out_fifo_wr_ptr_reg = 0;
+reg [OUTPUT_FIFO_ADDR_WIDTH+1-1:0] out_fifo_rd_ptr_reg = 0;
+
+wire out_fifo_full  = out_fifo_wr_ptr_reg == (out_fifo_rd_ptr_reg ^ {1'b1, {OUTPUT_FIFO_ADDR_WIDTH{1'b0}}});
+wire out_fifo_empty = out_fifo_wr_ptr_reg == out_fifo_rd_ptr_reg;
+wire [OUTPUT_FIFO_ADDR_WIDTH:0] out_fifo_used = out_fifo_wr_ptr_reg - out_fifo_rd_ptr_reg;
+wire out_fifo_has_room = (out_fifo_used <= OUTPUT_FIFO_DEPTH - OUTPUT_FIFO_SLACK);
+
+// Accept a beat while the UDP header / payload is being parsed, and always
+// drain a datagram that is dropped for a port mismatch (nothing is written to
+// the output FIFO in that case, so no room is needed).
+assign udp_rx_axis_tready = (((recv_reg == RECV_DES) || (recv_reg == RECV_DAT)) && out_fifo_has_room)
+                         || (recv_reg == RECV_DRP);
 
 reg [15:0] checksum_header0_next,checksum_header0_reg = 'b0;
 reg [15:0] checksum_header1_next,checksum_header1_reg = 'b0;
@@ -121,7 +127,9 @@ reg [15:0] checksum_eth2_reg = 'b0;
 reg [15:0] checksum_eth3_reg = 'b0; 
 reg [15:0] checksum_eth4_reg = 'b0; 
 reg [15:0] checksum_eth5_reg = 'b0; 
-reg [15:0] checksum_eth_reg  = 'b0; 
+reg        checksum_absent_reg  = 1'b0;
+reg        checksum_absent4_reg = 1'b0;
+reg        checksum_valid_reg   = 1'b0;
 
 
 reg [63:0] app_tdata_reg;
@@ -135,6 +143,9 @@ reg [15:0]  recv_dst_port,recv_dst_port_reg = 'b0;
 reg [15:0]  recv_src_port,recv_src_port_reg = 'b0;
 reg [15:0]  recv_length  ,recv_length_reg = 'b0;
 reg [15:0]  recv_checksum,recv_checksum_reg = 'b0;
+
+// UDP校验和为0表示发送端未计算校验和(IPv4下合法), 此时不做校验
+wire udp_cksum_absent = (recv_checksum_reg == 16'h0000);
 
 always @ * begin 
     recv_next = recv_reg;
@@ -165,7 +176,7 @@ always @ * begin
 
                 // destination-port filter: datagrams not addressed to the
                 // local port are drained without entering the datapath
-                // (nothing is written to the payload / length FIFOs)
+                // (nothing is written to the output FIFO)
                 if (recv_dst_port != local_udp_port || (dst_udp_port != recv_src_port)) begin
                     recv_next = udp_rx_axis_tlast ? RECV_DES : RECV_DRP;
                 end else begin
@@ -295,7 +306,9 @@ always @(posedge clk)begin
         checksum_eth3_reg <= 'b0;
         checksum_eth4_reg <= 'b0;
         checksum_eth5_reg <= 'b0;
-        checksum_eth_reg  <= 'b0;
+        checksum_absent_reg  <= 1'b0;
+        checksum_absent4_reg <= 1'b0;
+        checksum_valid_reg   <= 1'b0;
 
         app_tdata_reg <= 'b0;
         app_tkeep_reg <= 'b0;
@@ -328,11 +341,17 @@ always @(posedge clk)begin
             checksum_eth2_reg <= checksum_gen(checksum_header0_reg,checksum_header1_reg);
             checksum_eth3_reg <= checksum_gen(checksum_header4_reg,
                                 checksum_gen(checksum_header2_reg,checksum_header3_reg));
+            // 校验和为0表示发送端未计算校验和(IPv4/UDP允许), 随同一级流水寄存,
+            // 与checksum_valid_reg同拍对齐
+            checksum_absent_reg <= udp_cksum_absent;
         end
 
         checksum_eth4_reg <= checksum_gen(checksum_eth0_reg,checksum_eth1_reg);
         checksum_eth5_reg <= checksum_gen(checksum_eth2_reg,checksum_eth3_reg);
-        checksum_eth_reg  <= ~checksum_gen(checksum_eth4_reg,checksum_eth5_reg);
+        checksum_absent4_reg <= checksum_absent_reg;
+        // 1 = 本帧UDP校验和通过(或未使用), 与延迟线上的帧末拍同拍有效
+        checksum_valid_reg <= (checksum_gen(checksum_eth4_reg,checksum_eth5_reg) == 16'hffff)
+                           || checksum_absent4_reg;
 
         if(recv_reg == RECV_DAT && (udp_rx_axis_tready & udp_rx_axis_tvalid))begin 
             app_tdata_reg <= udp_rx_axis_tdata;
@@ -346,65 +365,25 @@ always @(posedge clk)begin
     end
 end
 
-
-//-------------------------------------------------------------
-localparam      WIDTH               = 75    ;	
-localparam      DEPTH               = 11    ;   	
-localparam      FIFO_TYPE           = "fwft";
-localparam      FIFO_MEMORY         = "auto";
-localparam      USER_ADV_FEATURES   = "1f1f";
-localparam      CASCADE_HEIGHT      = 0;
-localparam      DOUT_RESET_VALUE    = "0";
-localparam      ECC_MODE            = (FIFO_MEMORY == "auto") ? "no_ecc" : "en_ecc";
-localparam      FIFO_MEMORY_TYPE    = FIFO_MEMORY;
-localparam      FIFO_READ_LATENCY   = (FIFO_TYPE == "fwft") ? 0 : 1;
-localparam      FIFO_WRITE_DEPTH    = 2**DEPTH;
-localparam      FULL_RESET_VALUE    = 0;
-localparam      PROG_EMPTY_THRESH   = 10;
-localparam      PROG_FULL_THRESH    = 10;
-localparam      RD_DATA_COUNT_WIDTH = DEPTH + 1;
-localparam      READ_DATA_WIDTH     = WIDTH;
-localparam      READ_MODE           = FIFO_TYPE;
-localparam      SIM_ASSERT_CHK      = 1;
-localparam      USE_ADV_FEATURES    = USER_ADV_FEATURES;
-localparam      WAKEUP_TIME         = (FIFO_MEMORY_TYPE == "auto") ? 0 : 2;
-localparam      WRITE_DATA_WIDTH    = WIDTH;  
-localparam      WR_DATA_COUNT_WIDTH = DEPTH + 1;
+//-------------------------------------------------------------------------
+// 4-stage delay line aligning the payload with the checksum result, which
+// needs three more cycles after the last beat has been accepted
+//-------------------------------------------------------------------------
 localparam DLY_LENGTH = 4;
-
-// snapshot of per-frame lengths, aligned with the payload FIFO write via the
-// same DLY_LENGTH-stage delay line used for the data path
-wire frame_end = (recv_reg == RECV_DAT) && udp_rx_axis_tvalid && udp_rx_axis_tready && udp_rx_axis_tlast;
-wire [15:0] frame_total_wire = udp_payload_length_temp_reg + count_valid_bytes(udp_rx_axis_tkeep);
-
-reg [15:0] frame_payload_len;  // real UDP payload bytes (= UDP length field - 8)
-reg [15:0] frame_total_len;    // bytes written to payload FIFO (payload + padding)
-
-always @(posedge clk) begin
-    if (rst) begin
-        frame_payload_len <= 16'd0;
-        frame_total_len   <= 16'd0;
-    end else if (frame_end) begin
-        frame_payload_len <= (recv_length_reg > 16'd8) ? (recv_length_reg - 16'd8) : 16'd0;
-        frame_total_len   <= (frame_total_wire > 16'd8) ? (frame_total_wire - 16'd8) : 16'd0;
-    end
-end
-
 
 reg     [63:0]  app_tdata_dly[0:DLY_LENGTH - 1];
 reg     [7:0]   app_tkeep_dly[0:DLY_LENGTH - 1];
 reg     [DLY_LENGTH - 1 : 0]  app_tvalid_dly;
 reg     [DLY_LENGTH - 1 : 0]  app_tlast_dly;
 reg     [DLY_LENGTH - 1 : 0]  app_tuser_dly;
-reg     [15:0]  frame_payload_len_dly[0:DLY_LENGTH - 1];
-reg     [15:0]  frame_total_len_dly[0:DLY_LENGTH - 1];
 
-reg [63:0] app_rx_axis_tdata_init;
-reg [7:0]  app_rx_axis_tkeep_init;
-reg app_rx_axis_tuser_init;
-reg app_rx_axis_tvalid_init;
+
+wire [63:0] app_rx_axis_tdata_init;
+wire [7:0]  app_rx_axis_tkeep_init;
+wire app_rx_axis_tuser_init;
+wire app_rx_axis_tvalid_init;
 wire app_rx_axis_tready_init;
-reg app_rx_axis_tlast_init;
+wire app_rx_axis_tlast_init;
 
 
 genvar i;
@@ -415,23 +394,19 @@ generate
                 app_tdata_dly[i]    <=  0;
                 app_tkeep_dly[i]    <=  0;
                 app_tvalid_dly[i]   <=  0;
-                app_tlast_dly[i]    <=  0;
-                app_tuser_dly[i]    <=  0;
-                frame_payload_len_dly[i] <= 16'd0;
-                frame_total_len_dly[i]   <= 16'd0;
+                app_tlast_dly [i]    <=  0;
+                app_tuser_dly [i]    <=  0;
             end
             else begin
                 app_tdata_dly[i]    <=  (i == 0) ? app_tdata_reg : app_tdata_dly[i-1];
                 app_tkeep_dly[i]    <=  (i == 0) ? app_tkeep_reg : app_tkeep_dly[i-1];
                 app_tvalid_dly[i]   <=  (i == 0) ? app_tvalid_reg: app_tvalid_dly[i-1];
                 app_tlast_dly[i]    <=  (i == 0) ? app_tlast_reg : app_tlast_dly[i-1];
-                frame_payload_len_dly[i] <= (i == 0) ? frame_payload_len : frame_payload_len_dly[i-1];
-                frame_total_len_dly[i]   <= (i == 0) ? frame_total_len   : frame_total_len_dly[i-1];
                 if(i == 0)begin
                     app_tuser_dly[i] <= app_tuser_reg;
                 end
                 else if(i == DLY_LENGTH - 1)begin
-                    if(checksum_eth_reg == 16'h0000)begin
+                    if(checksum_valid_reg)begin
                             app_tuser_dly[i] <= app_tuser_dly[i-1];
                         end
                     else begin 
@@ -451,216 +426,17 @@ generate
     end
 endgenerate
 
-// one length entry per frame, written in lock-step with the final payload word
-wire udp_length_wren;
-assign udp_length_wren = app_tvalid_dly[DLY_LENGTH-1] && app_tlast_dly[DLY_LENGTH-1];
-
-reg   udp_payload_fifo_rden = 0;
-wire  udp_payload_alful,udp_payload_empty;
-wire [63:0] udp_payload_data;
-wire [7:0]  udp_payload_keep;
-wire        udp_payload_last;
-wire        udp_payload_valid;
-wire        udp_payload_user;
-
-xpm_fifo_sync #(
-      .CASCADE_HEIGHT       (CASCADE_HEIGHT      ),       
-      .DOUT_RESET_VALUE     (DOUT_RESET_VALUE    ),    
-      .ECC_MODE             (ECC_MODE            ),     
-      .FIFO_MEMORY_TYPE     (FIFO_MEMORY_TYPE    ),
-      .FIFO_READ_LATENCY    (FIFO_READ_LATENCY   ),   
-      .FIFO_WRITE_DEPTH     (FIFO_WRITE_DEPTH    ),  
-      .FULL_RESET_VALUE     (FULL_RESET_VALUE    ),     
-      .PROG_EMPTY_THRESH    (PROG_EMPTY_THRESH   ),   
-      .PROG_FULL_THRESH     (PROG_FULL_THRESH    ),   
-      .RD_DATA_COUNT_WIDTH  (RD_DATA_COUNT_WIDTH ),  
-      .READ_DATA_WIDTH      (READ_DATA_WIDTH     ),   
-      .READ_MODE            (READ_MODE           ),        
-      .SIM_ASSERT_CHK       (SIM_ASSERT_CHK      ),        
-      .USE_ADV_FEATURES     (USE_ADV_FEATURES    ), 
-      .WAKEUP_TIME          (WAKEUP_TIME         ),          
-      .WRITE_DATA_WIDTH     (WRITE_DATA_WIDTH    ),     
-      .WR_DATA_COUNT_WIDTH  (WR_DATA_COUNT_WIDTH )    
-)udp_payload_fifo (
-      .sleep                (0            ), 
-      .injectdbiterr        (1'b0         ),
-      .injectsbiterr        (1'b0         ), 
-      .almost_full          (udp_payload_alful),   
-      .dout                 ({ udp_payload_last,
-                                udp_payload_valid,
-                                udp_payload_user,
-                                udp_payload_keep,
-                                udp_payload_data}),       
-      .empty                (udp_payload_empty),                 
-      .din                  ({app_tlast_dly[DLY_LENGTH-1],
-                              app_tvalid_dly[DLY_LENGTH-1],
-                              app_tuser_dly[DLY_LENGTH-1],
-                              app_tkeep_dly[DLY_LENGTH-1],
-                              app_tdata_dly[DLY_LENGTH-1]}),              
-      .rd_en                (udp_payload_fifo_rden),               
-      .rst                  (rst),                  
-      .wr_clk               (clk),              
-      .wr_en                (app_tvalid_dly[DLY_LENGTH-1])           
-);
-
-wire [15:0] udp_payload_len;  // real UDP payload bytes to output (= UDP length field - 8)
-wire [15:0] udp_frame_len;    // bytes in payload FIFO for this frame (payload + padding)
-wire udp_recv_tuser;
-wire udp_length_alful, udp_length_empty;
-reg udp_length_rden = 0;
-xpm_fifo_sync #(
-      .CASCADE_HEIGHT       (CASCADE_HEIGHT      ),       
-      .DOUT_RESET_VALUE     (DOUT_RESET_VALUE    ),    
-      .ECC_MODE             (ECC_MODE            ),     
-      .FIFO_MEMORY_TYPE     (FIFO_MEMORY_TYPE    ),
-      .FIFO_READ_LATENCY    (1),   
-      .FIFO_WRITE_DEPTH     (FIFO_WRITE_DEPTH    ),  
-      .FULL_RESET_VALUE     (FULL_RESET_VALUE    ),     
-      .PROG_EMPTY_THRESH    (PROG_EMPTY_THRESH   ),   
-      .PROG_FULL_THRESH     (PROG_FULL_THRESH    ),   
-      .RD_DATA_COUNT_WIDTH  (RD_DATA_COUNT_WIDTH ),  
-      .READ_DATA_WIDTH      (33),   
-      .READ_MODE            ("std"),        
-      .SIM_ASSERT_CHK       (SIM_ASSERT_CHK      ),        
-      .USE_ADV_FEATURES     (USE_ADV_FEATURES    ), 
-      .WAKEUP_TIME          (WAKEUP_TIME         ),          
-      .WRITE_DATA_WIDTH     (33),     
-      .WR_DATA_COUNT_WIDTH  (WR_DATA_COUNT_WIDTH )    
-)udp_length_fifo (
-      .sleep                (0            ), 
-      .injectdbiterr        (1'b0         ),
-      .injectsbiterr        (1'b0         ), 
-      .almost_full          (udp_length_alful),   
-      .dout                 ({udp_recv_tuser, udp_frame_len, udp_payload_len}),      
-      .empty                (udp_length_empty),                 
-      .din                  ({app_tuser_dly[DLY_LENGTH-1],frame_total_len_dly[DLY_LENGTH-1],frame_payload_len_dly[DLY_LENGTH-1]}),              
-      .rd_en                (udp_length_rden),               
-      .rst                  (rst),                  
-      .wr_clk               (clk),              
-      .wr_en                (udp_length_wren)           
-);
+assign app_rx_axis_tdata_init = app_tdata_dly[DLY_LENGTH-1];
+assign app_rx_axis_tkeep_init = app_tkeep_dly[DLY_LENGTH-1];
+assign app_rx_axis_tvalid_init = app_tvalid_dly[DLY_LENGTH-1];
+assign app_rx_axis_tlast_init = app_tlast_dly[DLY_LENGTH-1];
+assign app_rx_axis_tuser_init = app_tuser_dly[DLY_LENGTH-1];
 
 //-------------------------------------------------------------------------
-// input backpressure: accept only while parsing header/payload and both FIFOs have room.
-// A datagram being discarded for port mismatch (RECV_DRP) is drained without
-// almost-full gating: nothing is written to the FIFOs while dropping.
-assign udp_rx_axis_tready = (((recv_reg == RECV_DES) || (recv_reg == RECV_DAT)) && ~udp_payload_alful && ~udp_length_alful)
-                         || (recv_reg == RECV_DRP);
-
-localparam APP_TX_IDLE  = 4'b0001,
-           APP_TX_WAIT  = 4'b0010,
-           APP_TX_DAT   = 4'b0100,
-           APP_TX_DRAIN = 4'b1000;
-
-reg [3:0] app_tx_next, app_tx_reg;
-reg [15:0] payload_remain_next, payload_remain_reg = 'b0;
-reg [15:0] frame_remain_next, frame_remain_reg = 'b0;
-
-always @ * begin
-    app_tx_next = app_tx_reg;
-    udp_length_rden = 1'b0;
-    udp_payload_fifo_rden = 1'b0;
-    payload_remain_next = payload_remain_reg;
-    frame_remain_next = frame_remain_reg;
-
-    app_rx_axis_tdata_init  = 64'd0;
-    app_rx_axis_tvalid_init = 1'b0;
-    app_rx_axis_tlast_init  = 1'b0;
-    app_rx_axis_tuser_init  = 1'b0;
-    app_rx_axis_tkeep_init  = 8'h00;
-
-    case (app_tx_reg)
-        APP_TX_IDLE : begin
-            if (~udp_length_empty) begin
-                udp_length_rden = 1'b1;
-                app_tx_next = APP_TX_WAIT;
-            end else begin
-                app_tx_next = APP_TX_IDLE;
-            end
-        end
-
-        APP_TX_WAIT : begin
-            // udp_payload_len: real payload bytes; udp_frame_len: payload + padding bytes
-            payload_remain_next = udp_payload_len;
-            frame_remain_next   = udp_frame_len;
-            if (udp_payload_len == 16'd0) begin
-                app_tx_next = APP_TX_DRAIN;  // empty payload: only discard padding
-            end else begin
-                app_tx_next = APP_TX_DAT;
-            end
-        end
-
-        APP_TX_DAT : begin
-            if (~udp_payload_empty && app_rx_axis_tready_init) begin
-                udp_payload_fifo_rden = 1'b1;
-                app_rx_axis_tdata_init  = udp_payload_data;
-                app_rx_axis_tvalid_init = 1'b1;
-
-                if (payload_remain_reg >= 16'd8) begin
-                    // whole word is payload
-                    app_rx_axis_tkeep_init = udp_payload_keep;
-                    payload_remain_next = payload_remain_reg - 16'd8;
-                    frame_remain_next   = frame_remain_reg - count_valid_bytes(udp_payload_keep);
-
-                    if (payload_remain_reg == 16'd8) begin
-                        // payload ends exactly at this word boundary
-                        app_rx_axis_tlast_init = 1'b1;
-                        app_rx_axis_tuser_init = udp_recv_tuser;
-                        app_tx_next = APP_TX_DRAIN;
-                    end else if (udp_payload_last) begin
-                        // truncated frame: wire ended before UDP length was consumed
-                        app_rx_axis_tlast_init = 1'b1;
-                        app_rx_axis_tuser_init = udp_recv_tuser;
-                        frame_remain_next = 16'd0;
-                        app_tx_next = APP_TX_IDLE;
-                    end else begin
-                        app_rx_axis_tlast_init = 1'b0;
-                        app_rx_axis_tuser_init = 1'b0;
-                    end
-                end else begin
-                    // payload ends inside this word (payload_remain_reg in 1..7)
-                    app_rx_axis_tkeep_init = (8'b1 << payload_remain_reg[2:0]) - 8'b1;
-                    app_rx_axis_tlast_init = 1'b1;
-                    app_rx_axis_tuser_init = udp_recv_tuser;
-                    payload_remain_next = 16'd0;
-                    frame_remain_next   = frame_remain_reg - count_valid_bytes(udp_payload_keep);
-                    app_tx_next = APP_TX_DRAIN;
-                end
-            end
-        end
-
-        APP_TX_DRAIN : begin
-            // discard remaining padding words of this frame
-            if (frame_remain_reg != 16'd0 && ~udp_payload_empty) begin
-                udp_payload_fifo_rden = 1'b1;
-                frame_remain_next = frame_remain_reg - count_valid_bytes(udp_payload_keep);
-                app_tx_next = APP_TX_DRAIN;
-            end else begin
-                app_tx_next = APP_TX_IDLE;
-            end
-        end
-
-        default: begin
-        end
-    endcase
-end
-
-always @(posedge clk) begin
-    if (rst) begin
-        app_tx_reg <= APP_TX_IDLE;
-        payload_remain_reg <= 'b0;
-        frame_remain_reg   <= 'b0;
-    end else begin
-        app_tx_reg <= app_tx_next;
-        payload_remain_reg <= payload_remain_next;
-        frame_remain_reg   <= frame_remain_next;
-    end
-end
-
+// Output FIFO: registered output (first-word-fall-through style), decouples
+// the delay line from the consumer handshake.  The pointers and the status
+// flags are declared with the input handshake at the top of this file.
 //-------------------------------------------------------------------------
-
-localparam  OUTPUT_FIFO_ADDR_WIDTH = 9;
-
 reg [63:0] app_rx_axis_tdata_reg = 'b0;
 reg [7:0]  app_rx_axis_tkeep_reg = 'b0;
 reg        app_rx_axis_tlast_reg = 'b0;
@@ -668,19 +444,13 @@ reg        app_rx_axis_tuser_reg = 'b0;
 reg        app_rx_axis_tvalid_reg= 'b0;
 
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg [63:0] out_fifo_wdata[2**OUTPUT_FIFO_ADDR_WIDTH-1:0];
+reg [63:0] out_fifo_wdata[OUTPUT_FIFO_DEPTH-1:0];
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg [7:0]  out_fifo_wstrb[2**OUTPUT_FIFO_ADDR_WIDTH-1:0];
+reg [7:0]  out_fifo_wstrb[OUTPUT_FIFO_DEPTH-1:0];
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg  out_fifo_eop[2**OUTPUT_FIFO_ADDR_WIDTH-1:0];
+reg  out_fifo_eop[OUTPUT_FIFO_DEPTH-1:0];
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg  out_fifo_tuser[2**OUTPUT_FIFO_ADDR_WIDTH-1:0];
-
-reg [OUTPUT_FIFO_ADDR_WIDTH+1-1:0] out_fifo_wr_ptr_reg = 0;
-reg [OUTPUT_FIFO_ADDR_WIDTH+1-1:0] out_fifo_rd_ptr_reg = 0;
-
-wire out_fifo_full = out_fifo_wr_ptr_reg == (out_fifo_rd_ptr_reg ^ {1'b1, {OUTPUT_FIFO_ADDR_WIDTH{1'b0}}});
-wire out_fifo_empty = out_fifo_wr_ptr_reg == out_fifo_rd_ptr_reg;
+reg  out_fifo_tuser[OUTPUT_FIFO_DEPTH-1:0];
 
 assign app_rx_axis_tready_init = !out_fifo_full;
 

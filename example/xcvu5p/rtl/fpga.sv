@@ -38,8 +38,8 @@ module fpga#(
     output wire [COUNT-1:0] gt_txp_out,
     output wire [COUNT-1:0] gt_txn_out
 );
-localparam UDP = 0;
-localparam TCP = 1;
+localparam UDP = 1;
+localparam TCP = 0;
 
 assign  qsfp0_lpmode = 1'b0	;
 assign  qsfp0_resetl_ls = 1'b1;
@@ -58,6 +58,7 @@ wire rst_125mhz_int;
 
 // Internal 156.25 MHz clock
 wire clk_156mhz_int;
+wire rst_156mhz_int_pre;
 wire rst_156mhz_int;
 
 wire mmcm_rst = 1'b0;
@@ -201,7 +202,17 @@ wire [7:0]  sfp0_rxc_int;
 
 
 assign clk_156mhz_int = sfp0_tx_clk_int;
-assign rst_156mhz_int = sfp0_tx_rst_int;
+
+// 复位从 PHY 的 sync_reset 直接扇出到全栈 2200+ 个同步复位端(FF 的 R、
+// BRAM 的 REGCE、LUTRAM 的 WE)。这根网络没有缓冲也没有复制，综合后是
+// 全设计扇出第一名，布线要横跨整片器件（实测单根 4.9ns，占满一个 6.4ns
+// 周期），会成为 WNS 瓶颈。这里用 BUFG 分发，把延时/偏斜压到全局时钟树水平。
+BUFG bufg_rst_156mhz_inst (
+    .I (rst_156mhz_int_pre),
+    .O (rst_156mhz_int)
+);
+assign rst_156mhz_int_pre = sfp0_tx_rst_int;
+
 
 
 eth_xcvr_phy_quad_wrapper #(
@@ -455,7 +466,7 @@ endgenerate
 //-----------------------------for tcp speed testing-----------------------//
 send_axis #(
    .STREAM_TDATA_WIDTH 	(64   ),
-   .MODE(1),
+   .MODE(0),
    .S_AXIS_FIFO_SYNC(1)   // 回环两侧同为clk_156mhz_int, 用同步FIFO避免复位网负载恶化
 )echo_tcp_test(
    .m_axis_aclk    	(clk_156mhz_int),
