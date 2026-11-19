@@ -54,6 +54,12 @@ reg [15:0] identification = 0;
 
 reg [15:0] ip_payload_length_reg      = 16'd0;
 reg [15:0] ip_payload_length_temp_reg = 16'd0;
+// protocol number of the frame whose length is in ip_payload_length_reg.
+// It has to be captured together with the length, on the last beat of the
+// frame: the descriptor FIFO is written one cycle later, and by then the
+// transport arbiter may already be presenting the next frame's protocol
+// number (round robin hands the bus straight to the other port).
+reg [7:0]  ip_frame_type_reg          = 8'd0;
 
 // 
 function [3:0] count_valid_bytes;
@@ -71,12 +77,13 @@ always @(posedge clk) begin
     if (rst) begin
         ip_payload_length_reg      <= 16'd0;
         ip_payload_length_temp_reg <= 16'd0;
+        ip_frame_type_reg          <= 8'd0;
     end
     else if (ip_tx_axis_tvalid && ip_tx_axis_tready) begin
         if (ip_tx_axis_tlast) begin
             ip_payload_length_reg <= ip_payload_length_temp_reg + count_valid_bytes(ip_tx_axis_tkeep);
             ip_payload_length_temp_reg <= 16'd0;
-            
+            ip_frame_type_reg <= ip_send_type;
         end
         else begin
             ip_payload_length_temp_reg <= ip_payload_length_temp_reg + count_valid_bytes(ip_tx_axis_tkeep);
@@ -182,7 +189,7 @@ xpm_fifo_sync #(
       .almost_full          (ip_desc_fifo_alfull),   
       .dout                 ({ip_desc_length , ip_type}),      
       .empty                (ip_desc_fifo_empty),                 
-      .din                  ({ip_payload_length_reg,ip_send_type}),              
+      .din                  ({ip_payload_length_reg,ip_frame_type_reg}),
       .rd_en                (ip_desc_fifo_rden_reg),               
       .rst                  (rst),                  
       .wr_clk               (clk),              

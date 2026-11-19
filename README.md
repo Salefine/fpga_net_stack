@@ -61,26 +61,17 @@
    make clean   # 清除生成的文件
    ```
 
-4. 40G 以太网 MAC 单元仿真（`tb/tb_eth_mac_40g.sv`）：针对 `l_ethernet` 40GBASE-R（256-bit AXI4-Stream、GT 外置、统计计数器）的自检测试平台，覆盖最小帧、尺寸扫描（61/100/512/1518/4096 B）、背靠背突发、错误帧（`tx_axis_tuser`）、帧内 AXI4-Stream 停顿以及统计计数器校验。
-
-   ```bash
-   # 独立运行：自动创建工程、生成 eth_xcvr_40_full IP 并仿真
-   vivado -mode batch -source tb/eth_mac_40g_sim.tcl
-   ```
-
-   也可在已有工程中把 `tb/tb_eth_mac_40g.sv` 加入 `sim_1` 文件集，仿真顶层设为 `tb_eth_mac_40g`。
-
-   PCS 侧使用"TX PCS 输出直连 RX PCS 输入"的串行环回模型。该核的 RX PCS 依赖 GT 的 64B/66B gearbox 才能完成 lane 同步，因此环回模式下 RX 通道检查会自动跳过（日志给出 WARNING，TX 通路与统计计数器仍完整校验）。RX 通路需在带 GT 的环境（IP 自带 example design 或实际板卡）中验证。
+4. PCS 侧使用"TX PCS 输出直连 RX PCS 输入"的串行环回模型。该核的 RX PCS 依赖 GT 的 64B/66B gearbox 才能完成 lane 同步，因此环回模式下 RX 通道检查会自动跳过（日志给出 WARNING，TX 通路与统计计数器仍完整校验）。RX 通路需在带 GT 的环境（IP 自带 example design 或实际板卡）中验证。
 
    代码中关于协议栈的选择，选择UDP/TCP就将其置1。
-
+   
    ```verilog
    localparam UDP = 0;
-   localparam TCP = 1;
+localparam TCP = 1;
    localparam AMD = 0;
-   ```
-
+```
    
+
 
 
 

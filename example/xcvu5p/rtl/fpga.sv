@@ -466,7 +466,7 @@ endgenerate
 //-----------------------------for tcp speed testing-----------------------//
 send_axis #(
    .STREAM_TDATA_WIDTH 	(64   ),
-   .MODE(0),
+   .MODE(1),
    .S_AXIS_FIFO_SYNC(1)   // 回环两侧同为clk_156mhz_int, 用同步FIFO避免复位网负载恶化
 )echo_tcp_test(
    .m_axis_aclk    	(clk_156mhz_int),
